@@ -1,0 +1,28 @@
+[analysis]
+extensions = [".xlsx", ".xlsm", ".xltx", ".xltm"]
+recursive = false
+strict_sheet_order = true
+
+# Les seuils privilégient l'absence de faux positifs. Ne les abaissez qu'après
+# validation sur un échantillon représentatif de fichiers POPS.
+min_axis_similarity = 0.62
+move_min_similarity = 0.84
+ambiguity_margin = 0.08
+
+max_cells_per_sheet = 500000
+max_rows = 50000
+max_columns = 2000
+max_style_gap = 25
+detect_value_only_expansion = false
+report_ambiguities = true
+
+# Exemple de règle optionnelle. Décommentez et adaptez si vous connaissez les
+# zones dans lesquelles les pays peuvent librement saisir des données/formules.
+# [[sheet_rules]]
+# pattern = "Budget"
+# editable_ranges = ["D8:N100"]
+# monitored_ranges = ["A1:N120"]
+
+# [[sheet_rules]]
+# pattern = "Notes*"
+# ignore = true

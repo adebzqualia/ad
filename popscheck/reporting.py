@@ -69,6 +69,7 @@ class _Issue:
     message: str
     sheet: Any = None
     element: Any = None
+    location: Any = None
     expected_position: Any = None
     observed_position: Any = None
     expected: Any = None
@@ -196,6 +197,15 @@ def _integer(value: Any) -> Optional[int]:
     except (TypeError, ValueError, OverflowError):
         return None
     return max(0, number)
+
+
+def _signed_integer(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _category(value: Any, code: Any = "", message: Any = "") -> str:
@@ -332,6 +342,14 @@ def _normalise_issue(raw: Any, forced_category: str = "") -> _Issue:
         message=message,
         sheet=_get(raw, "sheet", "sheet_name", "worksheet", "feuille", "onglet", default=None),
         element=_get(raw, "element", "item", "name", "header", "label", default=None),
+        location=_get(
+            raw,
+            "location",
+            "excel_location",
+            "address",
+            "reference",
+            default=_detail_value(details, "location", "excel_location", "address"),
+        ),
         expected_position=expected_position,
         observed_position=observed_position,
         expected=expected,
@@ -612,6 +630,22 @@ def _normalise_country(raw: Any, hint: str = "", index: int = 0) -> _Country:
     status_code, status_label, tone, missing_reason = _status(
         raw, total_anomalies, errors, reference_path, received_path
     )
+    validation_level = _token(
+        _get(raw, "validation_level", "validation_status", default="")
+    )
+    if not validation_level:
+        if status_code in {"erreur", "fichier_manquant", "sans_reference"} or errors:
+            validation_level = "error"
+        elif any(_severity_class(issue.severity) == "severity-error" for issue in anomalies):
+            validation_level = "error"
+        elif anomalies or warnings:
+            validation_level = "warning"
+        else:
+            validation_level = "ok"
+    if status_code == "anomalies" and validation_level == "error":
+        status_label, tone = "Erreur structurelle", "danger"
+    elif status_code == "conforme" and validation_level == "warning":
+        status_label, tone = "Avertissement", "warning"
     metadata = _get(raw, "metadata", "meta", default={})
     if not isinstance(metadata, Mapping):
         metadata = {}
@@ -805,6 +839,9 @@ tbody tr[data-href]:hover, tbody tr[data-href]:focus { outline: none; background
 .summary-strip { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 19px; padding: 18px 20px; border: 1px solid var(--line); border-left: 5px solid var(--brand); border-radius: var(--radius); background: #fff; box-shadow: var(--shadow); }
 .summary-strip.success { border-left-color: var(--success); } .summary-strip.warning { border-left-color: var(--warning); } .summary-strip.danger { border-left-color: var(--danger); }
 .summary-strip p { margin: 4px 0 0; color: var(--muted); }
+.summary-metrics { display: flex; gap: 26px; }
+.summary-metric { min-width: 110px; }
+.summary-metric .kpi-label, .summary-metric .kpi-value { display: block; }
 .file-grid, .category-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
 .file-card { padding: 16px; border: 1px solid var(--line); border-radius: 11px; background: #f9fbfd; }
 .file-label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .055em; text-transform: uppercase; }
@@ -977,9 +1014,11 @@ def _count_cell(country: _Country, category: str) -> str:
 
 def _index_row(country: _Country) -> str:
     filename = _html(country.filename)
+    received_filename = Path(_text(country.received_path)).name or "—"
     return (
         f'<tr data-status="{country.status_code}" data-country-key="{_html(country.key)}" data-href="{filename}">'
         f'<td><a class="country-link" href="{filename}">{_html(country.country)}</a></td>'
+        f'<td><code>{_html(received_filename)}</code></td>'
         f'<td><span class="status {country.tone}">{_html(country.status_label)}</span></td>'
         f'<td class="num">{_count_cell(country, "feuilles")}</td>'
         f'<td class="num">{_count_cell(country, "colonnes")}</td>'
@@ -1000,7 +1039,7 @@ def _render_index(countries: Sequence[_Country], title: str, run_metadata: Optio
 
     rows = "".join(_index_row(country) for country in countries)
     if not rows:
-        rows = '<tr><td colspan="7"><div class="empty"><strong>Aucun résultat</strong>Aucun fichier n’a été fourni pour cette exécution.</div></td></tr>'
+        rows = '<tr><td colspan="8"><div class="empty"><strong>Aucun résultat</strong>Aucun fichier n’a été fourni pour cette exécution.</div></td></tr>'
 
     body = f"""
 <header class="topbar"><div class="topbar-inner">
@@ -1034,7 +1073,7 @@ def _render_index(countries: Sequence[_Country], title: str, run_metadata: Optio
       <table id="country-summary">
         <caption class="sr-only">Résultats de conformité par pays</caption>
         <thead><tr>
-          <th scope="col">Pays</th><th scope="col">Statut</th>
+          <th scope="col">Pays</th><th scope="col">Fichier reçu</th><th scope="col">Statut</th>
           <th class="num" scope="col">Feuilles</th><th class="num" scope="col">Colonnes</th>
           <th class="num" scope="col">Lignes</th><th class="num" scope="col">Total anomalies</th>
           <th scope="col">Détail</th>
@@ -1076,6 +1115,7 @@ def _issue_html(issue: _Issue, number: int) -> str:
         (
             _fact("Feuille", issue.sheet),
             _fact("Élément", issue.element),
+            _fact("Localisation Excel", issue.location),
             _fact("Position attendue", issue.expected_position),
             _fact("Position observée", issue.observed_position),
             _fact("Attendu", issue.expected),
@@ -1138,6 +1178,41 @@ def _order_html(country: _Country) -> str:
 </section>"""
 
 
+def _dimension_summary_html(country: _Country) -> str:
+    summaries = country.metadata.get("sheet_summaries") if isinstance(country.metadata, Mapping) else None
+    if not isinstance(summaries, Mapping):
+        return ""
+    rows: list[str] = []
+    for sheet_name, raw_summary in summaries.items():
+        if not isinstance(raw_summary, Mapping):
+            continue
+        row_delta = _signed_integer(raw_summary.get("row_delta")) or 0
+        column_delta = _signed_integer(raw_summary.get("column_delta")) or 0
+        if not row_delta and not column_delta:
+            continue
+        rows.append(
+            "<tr>"
+            f"<th scope=\"row\">{_html(sheet_name)}</th>"
+            f"<td class=\"num\">{_html(raw_summary.get('expected_rows'))}</td>"
+            f"<td class=\"num\">{_html(raw_summary.get('observed_rows'))}</td>"
+            f"<td class=\"num\">{_html(row_delta)}</td>"
+            f"<td class=\"num\">{_html(raw_summary.get('expected_columns'))}</td>"
+            f"<td class=\"num\">{_html(raw_summary.get('observed_columns'))}</td>"
+            f"<td class=\"num\">{_html(column_delta)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return ""
+    return f"""
+<section class="panel" id="sheet-dimensions">
+  <div class="panel-header"><h2>Dimensions des feuilles affectées</h2></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col">Feuille</th><th class="num" scope="col">Lignes attendues</th><th class="num" scope="col">Lignes reçues</th><th class="num" scope="col">Écart</th><th class="num" scope="col">Colonnes attendues</th><th class="num" scope="col">Colonnes reçues</th><th class="num" scope="col">Écart</th></tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table></div>
+</section>"""
+
+
 def _render_country(country: _Country, title: str) -> str:
     category_cards = "".join(
         f'<article class="category-card" data-category="{category}"><span>{_CATEGORY_LABELS[category]}</span><strong id="count-{category}">{country.counts[category]}</strong></article>'
@@ -1171,7 +1246,7 @@ def _render_country(country: _Country, title: str) -> str:
 <main>
   <section class="summary-strip {country.tone}" data-status="{country.status_code}">
     <div><span class="status {country.tone}" id="status-global">{_html(country.status_label)}</span><p>{_html(status_message)}</p></div>
-    <div><span class="kpi-label">Total anomalies</span><strong class="kpi-value" id="total-anomalies">{country.total_anomalies}</strong></div>
+    <div class="summary-metrics"><div class="summary-metric"><span class="kpi-label">Causes structurelles</span><strong class="kpi-value" id="root-cause-count">{len(country.anomalies)}</strong></div><div class="summary-metric"><span class="kpi-label">Éléments affectés</span><strong class="kpi-value" id="total-anomalies">{country.total_anomalies}</strong></div></div>
   </section>
   {_alert("danger", "Erreurs rencontrées", country.errors)}
   {_alert("warning", "Avertissements", country.warnings)}
@@ -1186,6 +1261,7 @@ def _render_country(country: _Country, title: str) -> str:
     <div class="panel-header"><h2>Résumé par catégorie</h2></div>
     <div class="panel-body category-grid">{category_cards}</div>
   </section>
+  {_dimension_summary_html(country)}
   {_order_html(country)}
   <section aria-label="Détail des anomalies">{groups}</section>
   <p class="footer"><a href="index.html">Retour au rapport global</a> · Rapport autonome généré par POPS Check.</p>

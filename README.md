@@ -26,10 +26,13 @@ Les principaux garde-fous sont les suivants :
 2. Un texte ne sert d'ancre que s'il existe dans les deux classeurs et qu'il ne se trouve pas dans une plage déclarée modifiable.
 3. Les formules sont normalisées relativement à leur cellule. Par exemple, `=B5+$C$2` déplacée avec sa ligne et devenue `=B8+$C$2` conserve la même topologie.
 4. Les styles ne sont qu'un signal faible. Les fusions, tables, validations de données et dimensions apportent des indices complémentaires.
-5. Les lignes et colonnes sont alignées en deux passes afin qu'une modification sur un axe ne crée pas automatiquement des anomalies sur l'autre.
-6. Un déplacement n'est annoncé que si la correspondance dépasse un seuil élevé et se distingue suffisamment des autres candidats, ou si un libellé stable unique fournit une ancre non ambiguë.
-7. Si plusieurs lignes ou colonnes sont structurellement indiscernables, POPS Check préfère émettre un avertissement d'ambiguïté plutôt que d'inventer une position.
-8. Par défaut, une valeur isolée saisie au-delà du template ne suffit pas à créer une nouvelle ligne ou colonne structurelle.
+5. Les lignes et colonnes sont alignées en deux passes et chaque passe compare uniquement l'intersection déjà appariée sur l'autre axe. Une colonne supprimée ne contamine donc pas la signature de toutes les lignes, et inversement.
+6. Seules les signatures exactes, uniques et suffisamment informatives deviennent des ancres fortes. Les blocs restants sont alignés par un script d'édition monotone qui préfère un ajout ou une suppression à une série de mauvaises correspondances.
+7. Les déplacements sont recherchés après l'alignement monotone afin qu'une paire croisée ne vole pas une ancre à une insertion ou une suppression ordinaire.
+8. Une suppression suivie d'un ajout à la même position reste visible comme deux causes structurelles lorsque leurs signatures ne correspondent pas ; elle n'est plus assimilée automatiquement à un élément inchangé.
+9. Les ajouts ou suppressions contigus sont regroupés en une seule anomalie de plage, avec un impact égal au nombre de lignes ou colonnes concernées.
+10. Si plusieurs lignes ou colonnes sont structurellement indiscernables, POPS Check préfère émettre un avertissement d'ambiguïté plutôt que d'inventer une position.
+11. Par défaut, une valeur isolée saisie au-delà du template ne suffit pas à créer une nouvelle ligne ou colonne structurelle.
 
 Ces règles privilégient la réduction des faux positifs. Elles ne constituent pas une preuve mathématique qu'aucune modification n'a eu lieu ; les [limites fondamentales](#limites-fondamentales) restent applicables.
 
@@ -266,9 +269,9 @@ Le rapport global affiche :
 - les erreurs d'analyse ;
 - le nombre total d'anomalies structurelles.
 
-Chaque ligne mène à un rapport détaillé indiquant les fichiers comparés, le statut, les avertissements, l'ordre des feuilles et les positions attendues ou observées des anomalies.
+Chaque ligne mène à un rapport détaillé indiquant les fichiers comparés, le statut, les avertissements, l'ordre des feuilles et les positions attendues ou observées des anomalies. Les cartes d'anomalie affichent aussi une localisation Excel canonique, par exemple `'Forecast'!F:F` ou `'Budget'!25:25`, ainsi que les états attendu et reçu (`Absent` lorsque l'élément manque). Une synthèse des dimensions attendues et reçues apparaît pour les feuilles dont le nombre de lignes ou de colonnes diffère.
 
-Le fichier `resultats.json` contient les mêmes résultats sous une forme exploitable par un autre outil. Les rapports HTML sont autonomes : leurs styles et scripts sont intégrés et aucune connexion Internet n'est nécessaire.
+Le fichier `resultats.json` contient les mêmes résultats sous une forme exploitable par un autre outil. `root_cause_count` compte les groupes structurels affichés, `total_anomalies` compte les éléments affectés, `counts_by_code` fournit le détail par type (`ROW_REMOVED`, `COLUMN_ADDED`, etc.) et `validation_level` expose un niveau normalisé `ok`, `warning` ou `error`. Les rapports HTML sont autonomes : leurs styles et scripts sont intégrés et aucune connexion Internet n'est nécessaire.
 
 Ouvrez le rapport global sous Windows avec :
 
@@ -287,6 +290,8 @@ Les fichiers de l'exécution courante sont remplacés de manière atomique, mais
 | **Fichier manquant** | Une référence existe dans `sent`, mais aucun retour correspondant n'existe dans `received`. |
 | **Sans référence** | Un fichier reçu existe, mais aucune référence correspondante n'existe dans `sent`. |
 | **Erreur** | Le classeur est illisible, dépasse une limite de sûreté, provoque une erreur d'analyse ou entre en collision avec un autre nom. |
+
+Le rapport distingue en plus le niveau de validation : **OK**, **Avertissement** ou **Erreur structurelle**. Le statut machine historique reste inchangé pour préserver la compatibilité, tandis que `validation_level` expose ce niveau dans le JSON.
 
 Une modification de visibilité de feuille et une localisation structurelle ambiguë sont actuellement des avertissements. Elles ne sont pas ajoutées au nombre d'anomalies et, à elles seules, ne déclenchent pas le code 1 avec `--fail-on-issues`.
 
@@ -424,4 +429,4 @@ La suite automatisée repose sur `unittest` et génère ses classeurs dans des d
   -v
 ```
 
-Les tests couvrent notamment les saisies normales, les ajouts, suppressions et déplacements d'axes, l'ordre des feuilles, les fichiers absents ou corrompus, l'immuabilité des fichiers d'entrée, les rapports HTML et les codes de sortie de la CLI.
+Les tests couvrent notamment les saisies normales, les ajouts, suppressions et déplacements d'axes, les remplacements à cardinalité constante, les modifications simultanées de lignes et colonnes, les suppressions physiques laissant des dimensions Excel résiduelles, les limites de `monitored_ranges`, l'ordre des feuilles, les fichiers absents ou corrompus, l'immuabilité des fichiers d'entrée, les rapports HTML et les codes de sortie de la CLI.

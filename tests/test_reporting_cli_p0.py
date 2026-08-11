@@ -100,6 +100,69 @@ class ReportingAndCliP0Tests(unittest.TestCase):
         self.assertIn(escape(payload, quote=True), rendered)
         self.assertIn("&lt;clé&gt;", rendered)
 
+    def test_detail_report_shows_excel_location_sides_and_dimension_delta(self) -> None:
+        rendered = render_country_html(
+            {
+                "country": "France",
+                "reference_path": "sent/France.xlsx",
+                "received_path": "received/France.xlsx",
+                "status": "anomalies",
+                "anomalies": [
+                    {
+                        "category": "colonnes",
+                        "code": "COLUMN_REMOVED",
+                        "message": "Colonne supprimée",
+                        "sheet": "Forecast",
+                        "location": "'Forecast'!D:D",
+                        "expected_position": "D",
+                        "expected": "COL::Mars",
+                        "observed": "Absent",
+                    }
+                ],
+                "metadata": {
+                    "sheet_summaries": {
+                        "Forecast": {
+                            "expected_rows": 6,
+                            "observed_rows": 6,
+                            "row_delta": 0,
+                            "expected_columns": 6,
+                            "observed_columns": 5,
+                            "column_delta": -1,
+                        }
+                    }
+                },
+            }
+        )
+
+        self.assertIn("Localisation Excel", rendered)
+        self.assertIn(escape("'Forecast'!D:D", quote=True), rendered)
+        self.assertIn("COL::Mars", rendered)
+        self.assertIn("Absent", rendered)
+        self.assertIn("Dimensions des feuilles affectées", rendered)
+        self.assertIn('id="root-cause-count">1</strong>', rendered)
+        self.assertIn('id="total-anomalies">1</strong>', rendered)
+
+    def test_error_severity_promotes_the_overall_validation_badge(self) -> None:
+        rendered = render_country_html(
+            {
+                "country": "France",
+                "status": "anomalies",
+                "anomalies": [
+                    {
+                        "category": "feuilles",
+                        "code": "SHEET_REMOVED",
+                        "message": "Feuille absente",
+                        "severity": "error",
+                    }
+                ],
+            }
+        )
+
+        self.assertIn(
+            '<span class="status danger" id="status-global">Erreur structurelle</span>',
+            rendered,
+        )
+
     def test_generate_reports_makes_unique_slugs_and_only_real_detail_links(self) -> None:
         reports = self.root / "reports"
         countries = [

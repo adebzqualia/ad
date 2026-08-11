@@ -4,7 +4,6 @@ import hashlib
 from bisect import bisect_left
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from difflib import SequenceMatcher
 import re
 from typing import Iterable
 
@@ -83,19 +82,25 @@ def build_axis_items(
     common_labels: set[str],
     *,
     orthogonal_mapping: dict[int, int] | None = None,
+    axis_mapping: dict[int, int] | None = None,
     observed_side: bool = False,
 ) -> list[AxisItem]:
     """Construit des signatures sparse; aucune valeur numérique n'est utilisée."""
     counters: list[Counter[str]] = [Counter() for _ in range(extent + 1)]
-    labels: list[list[str]] = [[] for _ in range(extent + 1)]
+    label_candidates: list[list[tuple[int, str]]] = [
+        [] for _ in range(extent + 1)
+    ]
 
     for (row, column), feature in sheet.cells.items():
-        if not rule.cell_is_monitored(row, column):
-            continue
         index = row if axis == "row" else column
         orthogonal = column if axis == "row" else row
         if not 1 <= index <= extent:
             continue
+        canonical_axis = index
+        if observed_side and axis_mapping is not None:
+            mapped_axis = axis_mapping.get(index)
+            if mapped_axis is not None:
+                canonical_axis = mapped_axis
         canonical_orthogonal: int | None = None
         if orthogonal_mapping is None:
             canonical_orthogonal = None
@@ -106,22 +111,63 @@ def build_axis_items(
                 # ligne/colonne a elle-même changé.
                 continue
         else:
-            canonical_orthogonal = orthogonal
+            canonical_orthogonal = orthogonal_mapping.get(orthogonal)
+            if canonical_orthogonal is None:
+                # The expected and observed signatures must be built over the
+                # same matched orthogonal intersection. Keeping a deleted
+                # column on expected rows (or a deleted row on expected
+                # columns) is the classic source of cascading false positives.
+                continue
 
-        editable = rule.cell_is_editable(row, column)
+        rule_orthogonal = (
+            canonical_orthogonal
+            if canonical_orthogonal is not None
+            else orthogonal
+        )
+        rule_row = canonical_axis if axis == "row" else rule_orthogonal
+        rule_column = rule_orthogonal if axis == "row" else canonical_axis
+        if observed_side and axis_mapping is None and rule.monitored_ranges:
+            # Bootstrap pass: the own-axis semantic coordinate is not known yet.
+            # Keep evidence shifted beyond its physical boundary, but still
+            # enforce the known orthogonal side of the configured ranges.
+            orthogonal_axis = "column" if axis == "row" else "row"
+            monitored = rule.axis_coordinate_is_monitored(
+                orthogonal_axis, rule_orthogonal
+            )
+        else:
+            monitored = rule.cell_is_monitored(rule_row, rule_column)
+        if not monitored:
+            continue
+
+        editable = rule.cell_is_editable(rule_row, rule_column)
         if feature.style:
             counters[index][_contextualize(f"S|{feature.style}", canonical_orthogonal)] += 1
         if feature.formula and not editable:
             counters[index][_contextualize(f"F|{feature.formula}", canonical_orthogonal)] += 1
             topology = _RELATIVE_REFERENCE_RE.sub("REF", feature.formula)
             counters[index][_contextualize(f"P|{topology}", canonical_orthogonal)] += 1
-        if feature.label and feature.label in common_labels and not editable:
-            counters[index][_contextualize(f"L|{feature.label}", canonical_orthogonal)] += 1
-            labels[index].append(feature.label)
+        if feature.label and not editable:
+            # Keep the leading textual label for the human-readable report even
+            # when the element was deleted/added and therefore is not common to
+            # both workbooks. It remains an alignment token only when stable on
+            # both sides, so business input values cannot create a match.
+            label_candidates[index].append((orthogonal, feature.label))
+            if feature.label in common_labels:
+                counters[index][
+                    _contextualize(f"L|{feature.label}", canonical_orthogonal)
+                ] += 1
 
     dimensions = sheet.row_dimensions if axis == "row" else sheet.column_dimensions
     for index, dimension in dimensions.items():
-        if 1 <= index <= extent:
+        canonical_index = (
+            axis_mapping.get(index, index)
+            if observed_side and axis_mapping is not None
+            else index
+        )
+        if (
+            1 <= index <= extent
+            and rule.axis_coordinate_is_monitored(axis, canonical_index)
+        ):
             counters[index][f"X|{dimension}"] += 1
 
     for structural_range in sheet.ranges:
@@ -132,6 +178,13 @@ def build_axis_items(
             start = max(1, structural_range.min_column)
             end = min(extent, structural_range.max_column)
         for index in range(start, end + 1):
+            canonical_index = (
+                axis_mapping.get(index, index)
+                if observed_side and axis_mapping is not None
+                else index
+            )
+            if not rule.axis_coordinate_is_monitored(axis, canonical_index):
+                continue
             token = structural_range.axis_token(axis, index)
             if token:
                 counters[index][token] += 1
@@ -139,7 +192,11 @@ def build_axis_items(
     items: list[AxisItem] = []
     for index in range(1, extent + 1):
         tokens = counters[index]
-        item_label = " · ".join(dict.fromkeys(labels[index]))[:160]
+        ordered_labels = [
+            label
+            for _, label in sorted(label_candidates[index], key=lambda item: item[0])
+        ]
+        item_label = next(iter(dict.fromkeys(ordered_labels)), "")[:160]
         items.append(
             AxisItem(
                 index=index,
@@ -338,37 +395,30 @@ def _monotonic_pairs(
     expected_by_index: dict[int, AxisItem],
     observed_by_index: dict[int, AxisItem],
     threshold: float,
+    ambiguities: list[str] | None = None,
 ) -> list[tuple[int, int, float]]:
     if not expected_indexes or not observed_indexes:
         return []
-    # Les blocs de même longueur sont appariés positionnellement, même si une
-    # formule ou un style a changé. C'est un choix volontaire anti-faux-positifs.
-    if len(expected_indexes) == len(observed_indexes):
-        return [
-            (
-                expected_index,
-                observed_index,
-                axis_similarity(expected_by_index[expected_index], observed_by_index[observed_index]),
-            )
-            for expected_index, observed_index in zip(expected_indexes, observed_indexes)
-        ]
-
     # Pour les blocs de tailles différentes, un petit alignement dynamique
     # monotone maximise la similarité sans créer de déplacements artificiels.
     n, m = len(expected_indexes), len(observed_indexes)
     if n * m > 300_000:
-        pair_count = min(n, m)
-        return [
-            (
-                expected_indexes[position],
-                observed_indexes[position],
-                axis_similarity(
-                    expected_by_index[expected_indexes[position]],
-                    observed_by_index[observed_indexes[position]],
-                ),
+        # A positional fallback remains linear, but it is no longer allowed to
+        # manufacture matches below the evidence threshold. The span is marked
+        # ambiguous because an exact location cannot be proven at this scale.
+        pairs: list[tuple[int, int, float]] = []
+        for expected_index, observed_index in zip(expected_indexes, observed_indexes):
+            similarity = axis_similarity(
+                expected_by_index[expected_index], observed_by_index[observed_index]
             )
-            for position in range(pair_count)
-        ]
+            if similarity >= threshold:
+                pairs.append((expected_index, observed_index, similarity))
+        if ambiguities is not None:
+            ambiguities.append(
+                "Bloc structurel volumineux aligné prudemment; certaines positions "
+                "ne peuvent pas être localisées avec certitude."
+            )
+        return pairs
     scores = [[0.0] * (m + 1) for _ in range(n + 1)]
     decisions = [[0] * (m + 1) for _ in range(n + 1)]  # 1 match, 2 skip expected, 3 skip observed
     for i in range(1, n + 1):
@@ -414,37 +464,33 @@ def align_axis(
     result = AxisAlignment()
     expected_by_index = {item.index: item for item in expected}
     observed_by_index = {item.index: item for item in observed}
-    matcher = SequenceMatcher(
-        None,
-        [item.key for item in expected],
-        [item.key for item in observed],
-        # Les très longues suites de lignes formatées à l'identique rendent
-        # SequenceMatcher quadratique si chaque répétition reste une ancre.
-        autojunk=max(len(expected), len(observed)) > 2_000,
+    expected_key_counts = Counter(item.key for item in expected)
+    observed_key_counts = Counter(item.key for item in observed)
+    observed_unique = {
+        item.key: item.index
+        for item in observed
+        if item.key != "EMPTY"
+        and item.information >= 2.0
+        and observed_key_counts[item.key] == 1
+    }
+    exact_candidates = sorted(
+        (item.index, observed_unique[item.key])
+        for item in expected
+        if item.key in observed_unique
+        and item.information >= 2.0
+        and expected_key_counts[item.key] == 1
     )
-    for block in matcher.get_matching_blocks():
-        for offset in range(block.size):
-            expected_index = expected[block.a + offset].index
-            observed_index = observed[block.b + offset].index
-            result.mapping[expected_index] = observed_index
-            result.scores[(expected_index, observed_index)] = 1.0
+    # Only unique, informative exact signatures are hard anchors. Repeated or
+    # empty rows/columns remain soft evidence so their location is not invented.
+    anchor_lis = _lis_positions([observed_index for _, observed_index in exact_candidates])
+    for position, (expected_index, observed_index) in enumerate(exact_candidates):
+        if position not in anchor_lis:
+            continue
+        result.mapping[expected_index] = observed_index
+        result.scores[(expected_index, observed_index)] = 1.0
 
     unmatched_expected = set(expected_by_index) - set(result.mapping)
     unmatched_observed = set(observed_by_index) - set(result.mapping.values())
-
-    high_pairs, ambiguities = _unique_high_confidence_pairs(
-        unmatched_expected,
-        unmatched_observed,
-        expected_by_index,
-        observed_by_index,
-        analysis,
-    )
-    result.ambiguities.extend(dict.fromkeys(ambiguities))
-    for expected_index, observed_index, score in high_pairs:
-        result.mapping[expected_index] = observed_index
-        result.scores[(expected_index, observed_index)] = score
-        unmatched_expected.discard(expected_index)
-        unmatched_observed.discard(observed_index)
 
     # On traite chaque intervalle restant entre deux ancres déjà appariées. Cela
     # maintient la monotonie et localise correctement les insertions/suppressions.
@@ -476,6 +522,7 @@ def align_axis(
             expected_by_index,
             observed_by_index,
             analysis.min_axis_similarity,
+            result.ambiguities,
         ):
             if expected_index not in unmatched_expected or observed_index not in unmatched_observed:
                 continue
@@ -483,6 +530,23 @@ def align_axis(
             result.scores[(expected_index, observed_index)] = score
             unmatched_expected.remove(expected_index)
             unmatched_observed.remove(observed_index)
+
+    # Reordering is identified only after the monotone edit script. Crossing
+    # high-confidence pairs can therefore become moves without stealing anchors
+    # from ordinary insertions/deletions.
+    high_pairs, ambiguities = _unique_high_confidence_pairs(
+        unmatched_expected,
+        unmatched_observed,
+        expected_by_index,
+        observed_by_index,
+        analysis,
+    )
+    result.ambiguities.extend(dict.fromkeys(ambiguities))
+    for expected_index, observed_index, score in high_pairs:
+        result.mapping[expected_index] = observed_index
+        result.scores[(expected_index, observed_index)] = score
+        unmatched_expected.discard(expected_index)
+        unmatched_observed.discard(observed_index)
 
     result.removed = sorted(unmatched_expected)
     result.added = sorted(unmatched_observed)

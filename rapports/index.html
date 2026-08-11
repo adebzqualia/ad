@@ -62,6 +62,9 @@ tbody tr[data-href]:hover, tbody tr[data-href]:focus { outline: none; background
 .summary-strip { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 19px; padding: 18px 20px; border: 1px solid var(--line); border-left: 5px solid var(--brand); border-radius: var(--radius); background: #fff; box-shadow: var(--shadow); }
 .summary-strip.success { border-left-color: var(--success); } .summary-strip.warning { border-left-color: var(--warning); } .summary-strip.danger { border-left-color: var(--danger); }
 .summary-strip p { margin: 4px 0 0; color: var(--muted); }
+.summary-metrics { display: flex; gap: 26px; }
+.summary-metric { min-width: 110px; }
+.summary-metric .kpi-label, .summary-metric .kpi-value { display: block; }
 .file-grid, .category-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
 .file-card { padding: 16px; border: 1px solid var(--line); border-radius: 11px; background: #f9fbfd; }
 .file-label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .055em; text-transform: uppercase; }
@@ -123,7 +126,7 @@ tbody tr[data-href]:hover, tbody tr[data-href]:focus { outline: none; background
   <p class="eyebrow">POPS Check · Rapport global</p>
   <h1>Contrôle de conformité POPS</h1>
   <p class="subtitle">Vue synthétique des contrôles de conformité structurelle des classeurs retournés.</p>
-  <div class="run-meta"><span>Généré le 2026-08-10T15:14:12+02:00</span><span>Dossier envoyé : C:\Users\adnan\Documents\POPS_AD\data\sent</span><span>Dossier reçu : C:\Users\adnan\Documents\POPS_AD\data\received</span><span>Durée (s) : 0.001</span><span>Version : 1.0.0</span></div>
+  <div class="run-meta"><span>Généré le 2026-08-11T15:48:31+02:00</span><span>Dossier envoyé : C:\Users\adnan\Documents\ChatGPT\POPS_AD\data\sent</span><span>Dossier reçu : C:\Users\adnan\Documents\ChatGPT\POPS_AD\data\received</span><span>Durée (s) : 0.002</span><span>Version : 1.1.0</span></div>
 </div></header>
 <main>
   <section class="kpi-grid" aria-label="Indicateurs clés">
@@ -150,12 +153,12 @@ tbody tr[data-href]:hover, tbody tr[data-href]:focus { outline: none; background
       <table id="country-summary">
         <caption class="sr-only">Résultats de conformité par pays</caption>
         <thead><tr>
-          <th scope="col">Pays</th><th scope="col">Statut</th>
+          <th scope="col">Pays</th><th scope="col">Fichier reçu</th><th scope="col">Statut</th>
           <th class="num" scope="col">Feuilles</th><th class="num" scope="col">Colonnes</th>
           <th class="num" scope="col">Lignes</th><th class="num" scope="col">Total anomalies</th>
           <th scope="col">Détail</th>
         </tr></thead>
-        <tbody><tr><td colspan="7"><div class="empty"><strong>Aucun résultat</strong>Aucun fichier n’a été fourni pour cette exécution.</div></td></tr></tbody>
+        <tbody><tr><td colspan="8"><div class="empty"><strong>Aucun résultat</strong>Aucun fichier n’a été fourni pour cette exécution.</div></td></tr></tbody>
       </table>
     </div>
   </section>

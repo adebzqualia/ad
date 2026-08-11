@@ -50,10 +50,8 @@ class StructuralRange:
     def axis_token(self, axis: str, index: int) -> str | None:
         if axis == "row":
             start, end = self.min_row, self.max_row
-            orthogonal_span = self.max_column - self.min_column + 1
         else:
             start, end = self.min_column, self.max_column
-            orthogonal_span = self.max_row - self.min_row + 1
         if not start <= index <= end:
             return None
         if start == end:
@@ -64,8 +62,10 @@ class StructuralRange:
             role = "end"
         else:
             role = "inside"
-        axis_span = end - start + 1
-        return f"{self.kind}|{role}|a{axis_span}|o{orthogonal_span}|{self.tag}"
+        # Raw spans are deliberately omitted. A single row/column deletion changes
+        # the stored size of a merge/table/validation; embedding that size in every
+        # covered item would turn one edit into a sheet-wide signature mismatch.
+        return f"{self.kind}|{role}|{self.tag}"
 
 
 @dataclass(slots=True)
@@ -97,9 +97,10 @@ class SheetSnapshot:
         rule: SheetRule,
         *,
         include_literal_values: bool,
+        respect_monitored_range: bool = True,
     ) -> int:
         configured = rule.monitored_extent()
-        if configured:
+        if configured and respect_monitored_range:
             return configured[0] if axis == "row" else configured[1]
         if axis == "row":
             content_max = self.content_row_max

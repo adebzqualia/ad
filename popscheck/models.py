@@ -26,6 +26,9 @@ class Anomaly:
     severity: str = "warning"
     impact: int = 1
     details: dict[str, Any] = field(default_factory=dict)
+    location: str | None = None
+    expected: Any = None
+    observed: Any = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -56,6 +59,35 @@ class CountryResult:
             counts[anomaly.category] = counts.get(anomaly.category, 0) + max(0, anomaly.impact)
         return counts
 
+    @property
+    def counts_by_code(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for anomaly in self.anomalies:
+            counts[anomaly.code] = counts.get(anomaly.code, 0) + max(0, anomaly.impact)
+        return counts
+
+    @property
+    def root_cause_count(self) -> int:
+        return len(self.anomalies)
+
+    @property
+    def validation_level(self) -> str:
+        if self.status in {
+            Status.FICHIER_MANQUANT,
+            Status.SANS_REFERENCE,
+            Status.ERREUR,
+        }:
+            return "error"
+        error_severities = {"error", "critical", "danger", "fatal"}
+        if any(
+            str(anomaly.severity).casefold() in error_severities
+            for anomaly in self.anomalies
+        ):
+            return "error"
+        if self.anomalies or self.warnings:
+            return "warning"
+        return "ok"
+
     def finalize_status(self) -> None:
         if self.status in {Status.FICHIER_MANQUANT, Status.SANS_REFERENCE, Status.ERREUR}:
             return
@@ -65,7 +97,10 @@ class CountryResult:
         data = asdict(self)
         data["status"] = self.status.value
         data["total_anomalies"] = self.total_anomalies
+        data["root_cause_count"] = self.root_cause_count
+        data["validation_level"] = self.validation_level
         data["counts"] = self.counts
+        data["counts_by_code"] = self.counts_by_code
         return data
 
 
@@ -94,4 +129,3 @@ class RunSummary:
             "version": self.version,
             "results": [result.to_dict() for result in self.results],
         }
-

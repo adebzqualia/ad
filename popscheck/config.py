@@ -29,6 +29,19 @@ class SheetRule:
             return True
         return any(_contains(cell_range, row, column) for cell_range in self.monitored_ranges)
 
+    def axis_coordinate_is_monitored(self, axis: str, index: int) -> bool:
+        """Check one known axis while the other coordinate may still be unknown."""
+
+        if not self.monitored_ranges:
+            return True
+        for configured_range in self.monitored_ranges:
+            min_col, min_row, max_col, max_row = range_boundaries(configured_range)
+            if axis == "row" and min_row <= index <= max_row:
+                return True
+            if axis == "column" and min_col <= index <= max_col:
+                return True
+        return False
+
     def monitored_extent(self) -> tuple[int, int] | None:
         if not self.monitored_ranges:
             return None

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "popscheck"
-version = "1.0.0"
+version = "1.1.0"
 description = "Contrôle structurel des classeurs Excel POPS envoyés et reçus"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,4 +17,3 @@ popscheck = "popscheck.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["popscheck*"]
-

@@ -1,9 +1,9 @@
 {
-  "sent_dir": "C:\\Users\\adnan\\Documents\\POPS_AD\\data\\sent",
-  "received_dir": "C:\\Users\\adnan\\Documents\\POPS_AD\\data\\received",
-  "generated_at": "2026-08-10T15:14:12+02:00",
-  "duration_seconds": 0.001,
-  "version": "1.0.0",
-  "config_path": "C:\\Users\\adnan\\Documents\\POPS_AD\\popscheck.toml",
+  "sent_dir": "C:\\Users\\adnan\\Documents\\ChatGPT\\POPS_AD\\data\\sent",
+  "received_dir": "C:\\Users\\adnan\\Documents\\ChatGPT\\POPS_AD\\data\\received",
+  "generated_at": "2026-08-11T15:48:31+02:00",
+  "duration_seconds": 0.002,
+  "version": "1.1.0",
+  "config_path": "C:\\Users\\adnan\\Documents\\ChatGPT\\POPS_AD\\popscheck.toml",
   "results": []
 }

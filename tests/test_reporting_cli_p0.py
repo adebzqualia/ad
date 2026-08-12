@@ -10,7 +10,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from popscheck.cli import main
-from popscheck.reporting import generate_reports, render_country_html
+from popscheck.models import Anomaly, CountryResult
+from popscheck.reporting import generate_reports, render_country_html, render_index_html
 
 from tests.helpers import create_workbook
 
@@ -162,6 +163,81 @@ class ReportingAndCliP0Tests(unittest.TestCase):
             '<span class="status danger" id="status-global">Erreur structurelle</span>',
             rendered,
         )
+
+    def test_operational_report_renders_id_and_sheet_hierarchy(self) -> None:
+        rendered = render_country_html(
+            {
+                "country": "France",
+                "status": "anomalies",
+                "anomalies": [
+                    {
+                        "id": "pc-stable-123",
+                        "category": "formules",
+                        "code": "FORMULA_REMOVED",
+                        "message": "Formule supprimée",
+                        "sheet": "Forecast",
+                        "location": "'Forecast'!B2",
+                    }
+                ],
+            }
+        )
+
+        self.assertIn("pc-stable-123", rendered)
+        self.assertIn('data-anomaly-id="pc-stable-123"', rendered)
+        self.assertIn("Forecast", rendered)
+        self.assertIn("Causes racines", rendered)
+
+    def test_errors_and_error_validation_are_consistent_in_json_and_index(self) -> None:
+        result = CountryResult(key="fr", country="France", errors=["boom"])
+
+        self.assertEqual("error", result.to_dict()["validation_level"])
+        rendered = render_index_html([result])
+        self.assertIn('data-validation="error"', rendered)
+        self.assertIn("validation === 'error'", rendered)
+
+    def test_high_severity_is_error_in_json_and_html(self) -> None:
+        result = CountryResult(key="fr", country="France")
+        result.anomalies.append(
+            Anomaly(
+                category="autres",
+                code="HIGH_RISK",
+                message="Risque élevé",
+                severity="high",
+            )
+        )
+        result.finalize_status()
+
+        self.assertEqual("error", result.validation_level)
+        rendered = render_country_html(result)
+        self.assertIn("severity-error", rendered)
+        self.assertIn("ERROR", rendered)
+
+    def test_disabled_sheet_order_difference_is_not_rendered(self) -> None:
+        rendered = render_country_html(
+            {
+                "country": "France",
+                "status": "conforme",
+                "sheet_order_expected": ["A", "B", "C"],
+                "sheet_order_observed": ["C", "A", "B"],
+            }
+        )
+
+        self.assertNotIn("Ordre des feuilles", rendered)
+
+    def test_legacy_aggregate_counts_are_warning_not_false_ok(self) -> None:
+        rendered = render_country_html(
+            {
+                "country": "France",
+                "status": "anomalies",
+                "counts": {"colonnes": 3},
+                "total_anomalies": 3,
+                "anomalies": [],
+            }
+        )
+
+        self.assertIn("Avertissement", rendered)
+        self.assertIn("3 écart(s) agrégé(s)", rendered)
+        self.assertNotIn("Aucune anomalie détectée", rendered)
 
     def test_generate_reports_makes_unique_slugs_and_only_real_detail_links(self) -> None:
         reports = self.root / "reports"

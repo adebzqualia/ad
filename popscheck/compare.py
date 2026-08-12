@@ -7,10 +7,14 @@ from pathlib import Path
 from typing import Iterable
 
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
 
 from .align import AxisAlignment, AxisItem, align_axis, build_axis_items
 from .config import AppConfig, SheetRule
+from .formulas import SheetCoordinateMapping
 from .models import Anomaly, CountryResult, FileCandidate, Status
+from .semantic import compare_formula_layer, finalize_operational_anomalies
+from .values import compare_controlled_values, display_value
 from .workbook import SheetSnapshot, WorkbookSnapshot, load_snapshot
 
 
@@ -50,7 +54,14 @@ def _observed_extent(
 ) -> tuple[int, int]:
     configured = rule.monitored_extent()
     if configured:
-        expected_extent = configured[0] if axis == "row" else configured[1]
+        limit = (
+            config.analysis.max_rows
+            if axis == "row"
+            else config.analysis.max_columns
+        )
+        expected_extent = min(
+            limit, configured[0] if axis == "row" else configured[1]
+        )
         include_literals = config.analysis.detect_value_only_expansion
         expected_full = expected.extent(
             axis,
@@ -81,11 +92,6 @@ def _observed_extent(
                 include_literal_values=True,
                 respect_monitored_range=False,
             )
-        limit = (
-            config.analysis.max_rows
-            if axis == "row"
-            else config.analysis.max_columns
-        )
         observed_extent = max(
             0, min(limit, expected_extent + observed_full - expected_full)
         )
@@ -288,6 +294,7 @@ def _add_axis_anomalies(
     alignment: AxisAlignment,
     expected_items: list[AxisItem],
     observed_items: list[AxisItem],
+    rule: SheetRule,
 ) -> None:
     expected_by_index = {item.index: item for item in expected_items}
     observed_by_index = {item.index: item for item in observed_items}
@@ -332,6 +339,16 @@ def _add_axis_anomalies(
             else "limitée"
         )
 
+    def removal_is_critical(run: list[int]) -> bool:
+        for configured_range in rule.critical_ranges:
+            min_column, min_row, max_column, max_row = range_boundaries(
+                configured_range
+            )
+            start, end = (min_row, max_row) if is_row else (min_column, max_column)
+            if any(start <= index <= end for index in run):
+                return True
+        return False
+
     for run in _contiguous_runs(alignment.removed):
         item = expected_by_index.get(run[0])
         expected_position = span_position(run)
@@ -360,7 +377,7 @@ def _add_axis_anomalies(
                 location=location(run),
                 expected=element,
                 observed="Absent",
-                severity="warning",
+                severity="error" if removal_is_critical(run) else "warning",
                 impact=count,
                 details={
                     "confidence": run_confidence(
@@ -453,11 +470,11 @@ def _compare_sheet(
     observed: SheetSnapshot,
     result: CountryResult,
     config: AppConfig,
-) -> None:
+) -> SheetCoordinateMapping | None:
     rule = config.rule_for(expected.name)
     if rule.ignore:
         result.metadata.setdefault("ignored_sheets", []).append(expected.name)
-        return
+        return None
     if expected.kind != observed.kind:
         result.anomalies.append(
             Anomaly(
@@ -474,9 +491,9 @@ def _compare_sheet(
                 severity="error",
             )
         )
-        return
+        return None
     if expected.kind != "worksheet":
-        return
+        return None
     if expected.state != observed.state:
         result.warnings.append(
             f"{expected.name} : visibilité modifiée ({expected.state} → {observed.state})."
@@ -517,6 +534,7 @@ def _compare_sheet(
         column_alignment,
         expected_columns,
         observed_columns,
+        rule,
     )
     _add_axis_anomalies(
         result,
@@ -525,6 +543,54 @@ def _compare_sheet(
         row_alignment,
         expected_rows,
         observed_rows,
+        rule,
+    )
+    for difference in compare_controlled_values(
+        expected,
+        observed,
+        row_alignment.mapping,
+        column_alignment.mapping,
+        rule,
+        config.analysis,
+    ):
+        messages = {
+            "VALUE_ADDED_OUTSIDE_EDITABLE_ZONE": "Valeur ajoutée hors zone de saisie autorisée",
+            "STRUCTURAL_VALUE_REMOVED": "Valeur structurelle supprimée",
+            "CONTROLLED_VALUE_CHANGED": "Valeur contrôlée modifiée",
+        }
+        result.anomalies.append(
+            Anomaly(
+                category="valeurs",
+                code=difference.code,
+                message=(
+                    f"{messages[difference.code]} dans la feuille « {expected.name} » "
+                    f"à l'adresse {difference.expected_address}."
+                ),
+                sheet=expected.name,
+                element=f"Cellule {difference.expected_address}",
+                expected_position=difference.expected_address,
+                observed_position=difference.observed_address,
+                severity=difference.severity,
+                location=f"{_sheet_reference(expected.name)}!{difference.expected_address}",
+                expected=display_value(difference.expected),
+                observed=display_value(difference.observed),
+                confidence={
+                    "level": "high",
+                    "score": 1.0,
+                    "reasons": ["Cellule réalignée dans une plage contrôlée explicite"],
+                },
+                details={
+                    "mapping_status": (
+                        "exact"
+                        if difference.expected_coordinate == difference.observed_coordinate
+                        else "shifted"
+                    )
+                },
+            )
+        )
+    return SheetCoordinateMapping(
+        rows=dict(row_alignment.mapping),
+        columns=dict(column_alignment.mapping),
     )
 
 
@@ -604,11 +670,22 @@ def compare_snapshots(
             )
         )
 
+    coordinate_mappings: dict[str, SheetCoordinateMapping] = {}
     for sheet_name in expected_common:
-        _compare_sheet(
+        mapping = _compare_sheet(
             expected.sheets[sheet_name], observed.sheets[sheet_name], result, config
         )
-    result.metadata["analyzed_sheets"] = len(expected_common)
+        if mapping is not None:
+            coordinate_mappings[sheet_name] = mapping
+    compare_formula_layer(
+        expected,
+        observed,
+        result,
+        coordinate_mappings,
+        config,
+    )
+    finalize_operational_anomalies(result)
+    result.metadata["analyzed_sheets"] = len(coordinate_mappings)
     result.finalize_status()
     return result
 

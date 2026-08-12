@@ -11,7 +11,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table
 
 from popscheck import compare_workbooks
-from popscheck.config import AppConfig, SheetRule
+from popscheck.config import AnalysisConfig, AppConfig, SheetRule
 from popscheck.models import Status
 
 from tests.helpers import BASE_COLUMNS, BASE_ROWS, create_workbook, without
@@ -287,6 +287,95 @@ class StructureAwareRegressionTests(unittest.TestCase):
 
         self.assertEqual(["COLUMN_ADDED"], [item.code for item in result.anomalies])
         self.assertEqual("D", result.anomalies[0].observed_position)
+
+    def test_removed_critical_column_is_an_error(self) -> None:
+        config = AppConfig(
+            sheet_rules=(
+                SheetRule(pattern=SHEET_NAME, critical_ranges=("D1:D6",)),
+            )
+        )
+
+        result = self._compare(columns=without(BASE_COLUMNS, "Mars"), config=config)
+
+        self.assertEqual(["COLUMN_REMOVED"], [item.code for item in result.anomalies])
+        self.assertEqual("error", result.anomalies[0].severity)
+
+    def test_controlled_range_extends_scan_without_monitored_range(self) -> None:
+        reference = create_workbook(
+            self.root / "sent" / "France.xlsx", sheets=(SHEET_NAME,)
+        )
+        received = self.root / "received" / "France.xlsx"
+        received.parent.mkdir(parents=True, exist_ok=True)
+        copyfile(reference, received)
+        workbook = load_workbook(received)
+        try:
+            workbook[SHEET_NAME]["B100"] = 123
+            workbook.save(received)
+        finally:
+            workbook.close()
+        config = AppConfig(
+            sheet_rules=(
+                SheetRule(pattern=SHEET_NAME, controlled_ranges=("B100:B100",)),
+            )
+        )
+
+        result = compare_workbooks(reference, received, config=config)
+
+        self.assertEqual(
+            ["VALUE_ADDED_OUTSIDE_EDITABLE_ZONE"],
+            [item.code for item in result.anomalies],
+            result.to_dict(),
+        )
+
+    def test_formula_on_removed_row_does_not_create_dependency_root(self) -> None:
+        reference = create_workbook(
+            self.root / "sent" / "France.xlsx",
+            sheets=(SHEET_NAME, "Inputs"),
+            entries={(SHEET_NAME, "Marge", "Janvier"): "='Inputs'!A1"},
+        )
+        received = self.root / "received" / "France.xlsx"
+        received.parent.mkdir(parents=True, exist_ok=True)
+        copyfile(reference, received)
+        workbook = load_workbook(received)
+        try:
+            workbook[SHEET_NAME].delete_rows(4, 1)
+            workbook.save(received)
+        finally:
+            workbook.close()
+
+        result = compare_workbooks(reference, received)
+
+        self.assertEqual(["ROW_REMOVED"], [item.code for item in result.anomalies])
+
+    def test_monitored_extent_is_clamped_to_analysis_limit(self) -> None:
+        config = AppConfig(
+            analysis=AnalysisConfig(max_rows=10),
+            sheet_rules=(
+                SheetRule(pattern=SHEET_NAME, monitored_ranges=("A1:A100",)),
+            ),
+        )
+
+        result = self._compare(config=config)
+
+        self.assertFalse(result.anomalies, result.to_dict())
+        summary = result.metadata["sheet_summaries"][SHEET_NAME]
+        self.assertEqual(10, summary["expected_rows"])
+        self.assertEqual(10, summary["observed_rows"])
+
+    def test_noncontiguous_additions_receive_distinct_stable_ids(self) -> None:
+        received_rows = (
+            BASE_ROWS[0],
+            "Ajustement",
+            *BASE_ROWS[1:4],
+            "Ajustement",
+            *BASE_ROWS[4:],
+        )
+
+        result = self._compare(rows=received_rows)
+
+        additions = [item for item in result.anomalies if item.code == "ROW_ADDED"]
+        self.assertEqual(2, len(additions), result.to_dict())
+        self.assertEqual(2, len({item.id for item in additions}))
 
 
 if __name__ == "__main__":

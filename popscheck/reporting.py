@@ -52,11 +52,23 @@ _RESULT_FIELDS = {
     "issues",
     "errors",
 }
-_CATEGORY_ORDER = ("feuilles", "colonnes", "lignes", "fichier", "autres")
+_CATEGORY_ORDER = (
+    "feuilles",
+    "colonnes",
+    "lignes",
+    "formules",
+    "dependances",
+    "valeurs",
+    "fichier",
+    "autres",
+)
 _CATEGORY_LABELS = {
     "feuilles": "Feuilles",
     "colonnes": "Colonnes",
     "lignes": "Lignes",
+    "formules": "Formules",
+    "dependances": "Dépendances",
+    "valeurs": "Valeurs contrôlées",
     "fichier": "Fichier",
     "autres": "Autres",
 }
@@ -67,6 +79,7 @@ class _Issue:
     category: str
     code: str
     message: str
+    id: Any = None
     sheet: Any = None
     element: Any = None
     location: Any = None
@@ -77,6 +90,10 @@ class _Issue:
     severity: str = "warning"
     impact: int = 1
     details: Mapping[str, Any] = field(default_factory=dict)
+    confidence: Any = None
+    consequences: Sequence[Any] = field(default_factory=tuple)
+    action: Mapping[str, Any] = field(default_factory=dict)
+    noise_reduction: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -88,6 +105,7 @@ class _Country:
     status_code: str
     status_label: str
     tone: str
+    validation_level: str
     anomalies: list[_Issue]
     errors: list[str]
     warnings: list[str]
@@ -98,6 +116,20 @@ class _Country:
     total_anomalies: int
     missing_reason: str = ""
     filename: str = ""
+
+    @property
+    def root_cause_count(self) -> int:
+        return len(self.anomalies)
+
+    @property
+    def affected_sheet_count(self) -> int:
+        return len(
+            {
+                _text(issue.sheet).strip().casefold()
+                for issue in self.anomalies
+                if _text(issue.sheet).strip()
+            }
+        )
 
 
 def _text(value: Any, default: str = "") -> str:
@@ -214,6 +246,9 @@ def _category(value: Any, code: Any = "", message: Any = "") -> str:
         "feuilles": {"feuille", "feuilles", "sheet", "sheets", "worksheet", "worksheets"},
         "colonnes": {"colonne", "colonnes", "column", "columns", "col"},
         "lignes": {"ligne", "lignes", "row", "rows"},
+        "formules": {"formule", "formules", "formula", "formulas"},
+        "dependances": {"dependance", "dependances", "dependency", "dependencies"},
+        "valeurs": {"valeur", "valeurs", "value", "values"},
         "fichier": {"fichier", "fichiers", "file", "files", "workbook", "classeur"},
         "autres": {"autre", "autres", "other", "others"},
     }
@@ -227,6 +262,12 @@ def _category(value: Any, code: Any = "", message: Any = "") -> str:
         return "colonnes"
     if code_token.startswith("row_"):
         return "lignes"
+    if code_token.startswith(("formula_", "invalid_reference", "anchoring_")):
+        return "formules"
+    if code_token.startswith(("dependency_", "external_link_", "missing_referenced_")):
+        return "dependances"
+    if code_token.startswith(("value_", "controlled_value_", "structural_value_")):
+        return "valeurs"
     if code_token.startswith(("file_", "workbook_", "reference_", "received_", "invalid_")):
         return "fichier"
     # Le message sert uniquement de repli : il contient souvent « dans la
@@ -340,6 +381,7 @@ def _normalise_issue(raw: Any, forced_category: str = "") -> _Issue:
         category=category,
         code=code,
         message=message,
+        id=_get(raw, "id", "anomaly_id", default=None),
         sheet=_get(raw, "sheet", "sheet_name", "worksheet", "feuille", "onglet", default=None),
         element=_get(raw, "element", "item", "name", "header", "label", default=None),
         location=_get(
@@ -357,6 +399,12 @@ def _normalise_issue(raw: Any, forced_category: str = "") -> _Issue:
         severity=_token(_get(raw, "severity", "niveau", "level", default="warning")) or "warning",
         impact=impact,
         details=details,
+        confidence=_get(raw, "confidence", default=_detail_value(details, "confidence")),
+        consequences=tuple(_list(_get(raw, "consequences", "impacts", default=[]))),
+        action=_normalise_details(_get(raw, "action", "recommended_action", default={})),
+        noise_reduction=_normalise_details(
+            _get(raw, "noise_reduction", "noise", default={})
+        ),
     )
 
 
@@ -433,6 +481,14 @@ def _provided_count(raw: Any, category: str) -> Optional[int]:
         "feuilles": ("feuilles", "sheets", "sheet_count", "sheet_anomalies_count"),
         "colonnes": ("colonnes", "columns", "column_count", "column_anomalies_count"),
         "lignes": ("lignes", "rows", "row_count", "row_anomalies_count"),
+        "formules": ("formules", "formulas", "formula_count", "formula_anomalies_count"),
+        "dependances": (
+            "dependances",
+            "dependencies",
+            "dependency_count",
+            "dependency_anomalies_count",
+        ),
+        "valeurs": ("valeurs", "values", "value_count", "value_anomalies_count"),
         "fichier": ("fichier", "file", "files", "file_count", "file_anomalies_count"),
         "autres": ("autres", "other", "others", "other_count"),
     }[category]
@@ -630,20 +686,30 @@ def _normalise_country(raw: Any, hint: str = "", index: int = 0) -> _Country:
     status_code, status_label, tone, missing_reason = _status(
         raw, total_anomalies, errors, reference_path, received_path
     )
-    validation_level = _token(
+    provided_validation_level = _token(
         _get(raw, "validation_level", "validation_status", default="")
     )
-    if not validation_level:
-        if status_code in {"erreur", "fichier_manquant", "sans_reference"} or errors:
-            validation_level = "error"
-        elif any(_severity_class(issue.severity) == "severity-error" for issue in anomalies):
-            validation_level = "error"
-        elif anomalies or warnings:
-            validation_level = "warning"
-        else:
-            validation_level = "ok"
+    if status_code in {"erreur", "fichier_manquant", "sans_reference"} or errors:
+        computed_validation_level = "error"
+    elif any(_severity_class(issue.severity) == "severity-error" for issue in anomalies):
+        computed_validation_level = "error"
+    elif anomalies or warnings or total_anomalies:
+        computed_validation_level = "warning"
+    else:
+        computed_validation_level = "ok"
+    validation_ranks = {"ok": 0, "warning": 1, "error": 2}
+    validation_level = (
+        max(
+            (provided_validation_level, computed_validation_level),
+            key=lambda item: validation_ranks[item],
+        )
+        if provided_validation_level in validation_ranks
+        else computed_validation_level
+    )
     if status_code == "anomalies" and validation_level == "error":
         status_label, tone = "Erreur structurelle", "danger"
+    elif status_code == "anomalies" and validation_level == "warning":
+        status_label, tone = "Avertissement", "warning"
     elif status_code == "conforme" and validation_level == "warning":
         status_label, tone = "Avertissement", "warning"
     metadata = _get(raw, "metadata", "meta", default={})
@@ -658,6 +724,7 @@ def _normalise_country(raw: Any, hint: str = "", index: int = 0) -> _Country:
         status_code=status_code,
         status_label=status_label,
         tone=tone,
+        validation_level=validation_level,
         anomalies=anomalies,
         errors=errors,
         warnings=warnings,
@@ -715,6 +782,7 @@ def _normalise_results(results: Any) -> list[_Country]:
                     status_code="erreur",
                     status_label="Erreur",
                     tone="danger",
+                    validation_level="error",
                     anomalies=[],
                     errors=[f"Résultat illisible : {_text(exc, 'erreur inconnue')}"],
                     warnings=[],
@@ -804,7 +872,7 @@ h1 { margin: 0; font-size: clamp(25px, 4vw, 40px); line-height: 1.17; letter-spa
 .run-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
 .run-meta span { padding: 4px 9px; border: 1px solid rgba(255,255,255,.23); border-radius: 999px; color: #eaf5fc; background: rgba(255,255,255,.08); font-size: 12px; }
 main { padding: 28px 0 48px; }
-.kpi-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 13px; margin-bottom: 24px; }
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 13px; margin-bottom: 24px; }
 .kpi { position: relative; min-height: 126px; padding: 19px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
 .kpi::after { position: absolute; right: -25px; bottom: -36px; width: 92px; height: 92px; border-radius: 50%; background: #eaf1f8; content: ""; }
 .kpi.success::after { background: var(--success-bg); } .kpi.warning::after { background: var(--warning-bg); } .kpi.danger::after { background: var(--danger-bg); }
@@ -846,7 +914,7 @@ tbody tr[data-href]:hover, tbody tr[data-href]:focus { outline: none; background
 .file-card { padding: 16px; border: 1px solid var(--line); border-radius: 11px; background: #f9fbfd; }
 .file-label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .055em; text-transform: uppercase; }
 .file-path { display: block; overflow-wrap: anywhere; color: #243852; font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.category-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.category-grid { grid-template-columns: repeat(auto-fit, minmax(125px, 1fr)); }
 .category-card { padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
 .category-card span { display: block; color: var(--muted); font-size: 12px; }
 .category-card strong { display: block; margin-top: 3px; font-size: 25px; }
@@ -862,11 +930,20 @@ tbody tr[data-href]:hover, tbody tr[data-href]:focus { outline: none; background
 .issue-group { margin-top: 19px; }
 .issue-group-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .issue-group-header h2 { margin: 0; font-size: 18px; }
+.sheet-group { margin: 0 0 26px; padding: 17px; border: 1px solid var(--line); border-radius: 14px; background: #f8fafc; }
+.sheet-group > .issue-group-header { margin-bottom: 17px; }
+.sheet-category + .sheet-category { margin-top: 19px; }
+.sheet-category h3 { margin: 0 0 10px; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
 .count-badge { min-width: 29px; padding: 3px 9px; border-radius: 999px; color: var(--brand); background: #e7f0f8; font-size: 12px; font-weight: 800; text-align: center; }
 .issue-list { display: grid; gap: 10px; }
 .issue { padding: 16px 17px; border: 1px solid var(--line); border-left: 4px solid var(--warning); border-radius: 11px; background: #fff; box-shadow: 0 4px 14px rgba(26,49,79,.045); }
 .issue.severity-error, .issue.severity-critical { border-left-color: var(--danger); }
+.issue.severity-info { border-left-color: var(--brand); }
 .issue-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.issue-badges { display: flex; align-items: center; gap: 7px; }
+.severity-label { padding: 3px 7px; border-radius: 999px; background: #fff3cd; color: #795900; font-size: 11px; font-weight: 850; }
+.severity-error .severity-label { background: #fde8e8; color: var(--danger); }
+.severity-info .severity-label { background: #e7f0f8; color: var(--brand-dark); }
 .issue h3 { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
 .code { display: inline-block; margin-bottom: 3px; color: var(--muted); font: 700 11px/1.3 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .025em; }
 .impact { color: var(--muted); font-size: 12px; white-space: nowrap; }
@@ -879,6 +956,16 @@ tbody tr[data-href]:hover, tbody tr[data-href]:focus { outline: none; background
 .technical summary { cursor: pointer; font-size: 12px; font-weight: 750; }
 .technical dl { display: grid; grid-template-columns: minmax(120px, .35fr) 1fr; gap: 6px 12px; margin: 10px 0 0; font-size: 12px; }
 .technical dt { font-weight: 750; overflow-wrap: anywhere; } .technical dd { margin: 0; overflow-wrap: anywhere; }
+.consequences, .recommended-action { margin-top: 13px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 10px; background: #f8fafc; }
+.consequences h4, .recommended-action h4 { margin: 0 0 9px; font-size: 13px; }
+.consequence-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.consequence { padding: 9px 10px; border-left: 3px solid var(--warning); border-radius: 7px; background: #fff; }
+.consequence.confirmed { border-left-color: var(--danger); }
+.consequence.possible { border-left-color: var(--brand-2); }
+.consequence strong { display: block; font-size: 12px; }
+.consequence p, .recommended-action p { margin: 4px 0 0; color: #43546a; font-size: 12px; }
+.recommended-action ol { margin: 8px 0 0; padding-left: 20px; color: #43546a; font-size: 12px; }
+.country-message { margin-top: 10px !important; padding: 9px 10px; border-radius: 7px; background: #eaf2f8; }
 .footer { margin-top: 28px; color: var(--muted); font-size: 12px; text-align: center; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 @media (max-width: 1050px) { .kpi-grid { grid-template-columns: repeat(3, 1fr); } .category-grid { grid-template-columns: repeat(3, 1fr); } }
@@ -911,8 +998,9 @@ document.addEventListener('DOMContentLoaded', function () {
       const query = (search ? search.value : '').trim().toLocaleLowerCase('fr');
       rows.forEach(function (row) {
         const status = row.dataset.status || '';
+        const validation = row.dataset.validation || '';
         const statusMatch = active === 'all' || status === active ||
-          (active === 'danger' && (status === 'erreur' || status === 'fichier_manquant' || status === 'sans_reference'));
+          (active === 'danger' && (validation === 'error' || status === 'erreur' || status === 'fichier_manquant' || status === 'sans_reference'));
         const textMatch = !query || row.textContent.toLocaleLowerCase('fr').includes(query);
         row.hidden = !(statusMatch && textMatch);
       });
@@ -1015,15 +1103,20 @@ def _count_cell(country: _Country, category: str) -> str:
 def _index_row(country: _Country) -> str:
     filename = _html(country.filename)
     received_filename = Path(_text(country.received_path)).name or "—"
+    unavailable = country.status_code in {"fichier_manquant", "sans_reference"}
+    root_count = "—" if unavailable else str(country.root_cause_count)
+    element_count = "—" if unavailable else str(country.total_anomalies)
     return (
-        f'<tr data-status="{country.status_code}" data-country-key="{_html(country.key)}" data-href="{filename}">'
+        f'<tr data-status="{country.status_code}" data-validation="{_html(country.validation_level)}" data-country-key="{_html(country.key)}" data-href="{filename}">'
         f'<td><a class="country-link" href="{filename}">{_html(country.country)}</a></td>'
         f'<td><code>{_html(received_filename)}</code></td>'
         f'<td><span class="status {country.tone}">{_html(country.status_label)}</span></td>'
+        f'<td class="num">{country.affected_sheet_count if not unavailable else "—"}</td>'
         f'<td class="num">{_count_cell(country, "feuilles")}</td>'
         f'<td class="num">{_count_cell(country, "colonnes")}</td>'
         f'<td class="num">{_count_cell(country, "lignes")}</td>'
-        f'<td class="num"><strong>{_count_cell(country, "autres") if country.status_code in {"fichier_manquant", "sans_reference"} else country.total_anomalies}</strong></td>'
+        f'<td class="num"><strong>{root_count}</strong></td>'
+        f'<td class="num"><strong>{element_count}</strong></td>'
         f'<td><a class="detail-link" href="{filename}" aria-label="Voir le rapport de {_html(country.country)}">Voir →</a></td>'
         "</tr>"
     )
@@ -1035,11 +1128,12 @@ def _render_index(countries: Sequence[_Country], title: str, run_metadata: Optio
     anomalous = sum(country.status_code == "anomalies" for country in countries)
     missing = sum(country.status_code in {"fichier_manquant", "sans_reference"} for country in countries)
     errors = sum(country.status_code == "erreur" for country in countries)
-    anomalies = sum(country.total_anomalies for country in countries)
+    root_causes = sum(country.root_cause_count for country in countries)
+    affected_elements = sum(country.total_anomalies for country in countries)
 
     rows = "".join(_index_row(country) for country in countries)
     if not rows:
-        rows = '<tr><td colspan="8"><div class="empty"><strong>Aucun résultat</strong>Aucun fichier n’a été fourni pour cette exécution.</div></td></tr>'
+        rows = '<tr><td colspan="10"><div class="empty"><strong>Aucun résultat</strong>Aucun fichier n’a été fourni pour cette exécution.</div></td></tr>'
 
     body = f"""
 <header class="topbar"><div class="topbar-inner">
@@ -1055,7 +1149,8 @@ def _render_index(countries: Sequence[_Country], title: str, run_metadata: Optio
     {_kpi("kpi-anomalies", "Avec anomalies", anomalous, "warning")}
     {_kpi("kpi-manquants", "Fichiers manquants", missing, "danger")}
     {_kpi("kpi-erreurs", "Erreurs d’analyse", errors, "danger")}
-    {_kpi("kpi-total-anomalies", "Total anomalies", anomalies, "warning")}
+    {_kpi("kpi-root-causes", "Causes racines", root_causes, "warning")}
+    {_kpi("kpi-affected-elements", "Éléments directs", affected_elements, "warning")}
   </section>
   <section class="panel">
     <div class="panel-header">
@@ -1074,8 +1169,9 @@ def _render_index(countries: Sequence[_Country], title: str, run_metadata: Optio
         <caption class="sr-only">Résultats de conformité par pays</caption>
         <thead><tr>
           <th scope="col">Pays</th><th scope="col">Fichier reçu</th><th scope="col">Statut</th>
-          <th class="num" scope="col">Feuilles</th><th class="num" scope="col">Colonnes</th>
-          <th class="num" scope="col">Lignes</th><th class="num" scope="col">Total anomalies</th>
+          <th class="num" scope="col">Feuilles affectées</th><th class="num" scope="col">Anomalies feuilles</th>
+          <th class="num" scope="col">Colonnes</th><th class="num" scope="col">Lignes</th>
+          <th class="num" scope="col">Causes</th><th class="num" scope="col">Éléments</th>
           <th scope="col">Détail</th>
         </tr></thead>
         <tbody>{rows}</tbody>
@@ -1094,25 +1190,133 @@ def _fact(label: str, value: Any) -> str:
 
 
 def _severity_class(severity: str) -> str:
-    return "severity-error" if severity in {"error", "critical", "danger", "high", "fatal"} else "severity-warning"
+    if severity in {"error", "critical", "danger", "high", "fatal"}:
+        return "severity-error"
+    if severity in {"info", "information", "low"}:
+        return "severity-info"
+    return "severity-warning"
 
 
-def _details_html(details: Mapping[str, Any]) -> str:
+def _severity_label(severity: str) -> str:
+    severity_class = _severity_class(severity)
+    return {
+        "severity-error": "ERROR",
+        "severity-info": "INFO",
+        "severity-warning": "WARNING",
+    }[severity_class]
+
+
+def _details_html(
+    details: Mapping[str, Any],
+    title: str = "Informations techniques",
+) -> str:
     if not details:
         return ""
     rows: list[str] = []
     for key, value in details.items():
         rows.append(f"<dt>{_html(key)}</dt><dd>{_html(value)}</dd>")
     return (
-        '<details class="technical"><summary>Informations techniques</summary><dl>'
+        f'<details class="technical"><summary>{_html(title)}</summary><dl>'
         + "".join(rows)
         + "</dl></details>"
+    )
+
+
+def _confidence_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        level = _text(_get(value, "level", "niveau", default="")).strip()
+        score = _get(value, "score", default=None)
+        if isinstance(score, (int, float)) and not isinstance(score, bool):
+            percent = f"{max(0.0, min(1.0, float(score))) * 100:.0f} %"
+            return f"{level} ({percent})" if level else percent
+        return level
+    return _text(value)
+
+
+def _consequences_html(consequences: Sequence[Any]) -> str:
+    if not consequences:
+        return ""
+    items: list[str] = []
+    certainty_labels = {
+        "confirmed": "Impact confirmé",
+        "probable": "Impact probable",
+        "possible": "Impact possible",
+    }
+    for consequence in consequences:
+        certainty = _token(_get(consequence, "certainty", "certitude", default="possible"))
+        if certainty not in certainty_labels:
+            certainty = "possible"
+        code = _text(_get(consequence, "code", default="IMPACT"), "IMPACT")
+        count = _integer(_get(consequence, "count", default=1)) or 1
+        sheets = _list(_get(consequence, "affected_sheets", "sheets", default=[]))
+        locations = _list(_get(consequence, "sample_locations", "locations", default=[]))
+        explanation = _get(consequence, "explanation", "message", default="")
+        context_parts = []
+        if sheets:
+            context_parts.append("Feuilles : " + ", ".join(_text(item) for item in sheets))
+        if locations:
+            context_parts.append("Exemples : " + ", ".join(_text(item) for item in locations))
+        context = " · ".join(context_parts)
+        items.append(
+            f'<li class="consequence {certainty}">'
+            f"<strong>{_html(certainty_labels[certainty])} · {_html(code)} · {_html(count)}</strong>"
+            f"<p>{_html(explanation)}</p>"
+            + (f"<p>{_html(context)}</p>" if context else "")
+            + "</li>"
+        )
+    return (
+        '<section class="consequences"><h4>Conséquences rattachées à cette cause</h4>'
+        '<ul class="consequence-list">'
+        + "".join(items)
+        + "</ul></section>"
+    )
+
+
+def _action_html(action: Mapping[str, Any]) -> str:
+    if not action:
+        return ""
+    summary = _get(action, "summary", "message", default="")
+    steps = _list(_get(action, "steps", default=[]))
+    verification = _list(
+        _get(action, "verification_after_fix", "verification", default=[])
+    )
+    country_message = _get(action, "country_message", default="")
+    owner = _get(action, "owner", default="")
+    priority = _get(action, "priority", default="")
+    meta = " · ".join(
+        part for part in (_text(owner).strip(), _text(priority).strip()) if part
+    )
+    rendered_steps = (
+        "<ol>" + "".join(f"<li>{_html(step)}</li>" for step in steps) + "</ol>"
+        if steps
+        else ""
+    )
+    rendered_verification = (
+        '<p><strong>Après correction :</strong></p><ul>'
+        + "".join(f"<li>{_html(item)}</li>" for item in verification)
+        + "</ul>"
+        if verification
+        else ""
+    )
+    return (
+        '<section class="recommended-action"><h4>Action opérationnelle recommandée</h4>'
+        + (f"<p>{_html(meta)}</p>" if meta else "")
+        + (f"<p><strong>{_html(summary)}</strong></p>" if summary else "")
+        + rendered_steps
+        + rendered_verification
+        + (
+            f'<p class="country-message"><strong>Message pays :</strong> {_html(country_message)}</p>'
+            if country_message
+            else ""
+        )
+        + "</section>"
     )
 
 
 def _issue_html(issue: _Issue, number: int) -> str:
     facts = "".join(
         (
+            _fact("Identifiant", issue.id),
             _fact("Feuille", issue.sheet),
             _fact("Élément", issue.element),
             _fact("Localisation Excel", issue.location),
@@ -1120,15 +1324,23 @@ def _issue_html(issue: _Issue, number: int) -> str:
             _fact("Position observée", issue.observed_position),
             _fact("Attendu", issue.expected),
             _fact("Observé", issue.observed),
+            _fact("Confiance", _confidence_text(issue.confidence)),
         )
     )
     facts_html = f'<dl class="facts">{facts}</dl>' if facts else ""
     impact = f'<span class="impact">{issue.impact} éléments</span>' if issue.impact > 1 else ""
+    badges = (
+        f'<div class="issue-badges"><span class="severity-label">'
+        f'{_severity_label(issue.severity)}</span>{impact}</div>'
+    )
     return f"""
-<article class="issue {_severity_class(issue.severity)}" data-category="{issue.category}" data-anomaly-code="{_html(issue.code)}" data-impact="{issue.impact}">
-  <div class="issue-head"><div><span class="code">#{number} · {_html(issue.code)}</span><h3>{_html(issue.message)}</h3></div>{impact}</div>
+<article class="issue {_severity_class(issue.severity)}" data-category="{issue.category}" data-anomaly-code="{_html(issue.code)}" data-anomaly-id="{_html(issue.id)}" data-impact="{issue.impact}">
+  <div class="issue-head"><div><span class="code">#{number} · {_html(issue.code)}</span><h3>{_html(issue.message)}</h3></div>{badges}</div>
   {facts_html}
+  {_consequences_html(issue.consequences)}
+  {_action_html(issue.action)}
   {_details_html(issue.details)}
+  {_details_html(issue.noise_reduction, "Réduction des différences secondaires")}
 </article>"""
 
 
@@ -1154,6 +1366,103 @@ def _group_html(country: _Country, category: str) -> str:
 </section>"""
 
 
+def _sheet_groups_html(country: _Country) -> str:
+    """Render the operational hierarchy: sheet -> root cause -> impacts."""
+
+    if not country.anomalies:
+        return ""
+    numbered = {id(issue): index for index, issue in enumerate(country.anomalies, 1)}
+    by_sheet: dict[str, list[_Issue]] = {}
+    display_names: dict[str, str] = {}
+    workbook_key = "__workbook__"
+    for issue in country.anomalies:
+        display = _text(issue.sheet).strip()
+        key = display.casefold() if display else workbook_key
+        display_names.setdefault(key, display or "Classeur")
+        by_sheet.setdefault(key, []).append(issue)
+
+    ordered_keys: list[str] = []
+    if workbook_key in by_sheet:
+        ordered_keys.append(workbook_key)
+    for sheet in [*country.sheet_order_expected, *country.sheet_order_observed]:
+        display = _text(sheet).strip()
+        key = display.casefold()
+        if key in by_sheet and key not in ordered_keys:
+            ordered_keys.append(key)
+    ordered_keys.extend(
+        key
+        for key in sorted(by_sheet, key=lambda item: display_names[item].casefold())
+        if key not in ordered_keys
+    )
+
+    sections: list[str] = []
+    for sheet_index, key in enumerate(ordered_keys, 1):
+        issues = by_sheet[key]
+        category_sections: list[str] = []
+        for category in _CATEGORY_ORDER:
+            severity_order = {
+                "severity-error": 0,
+                "severity-warning": 1,
+                "severity-info": 2,
+            }
+            category_issues = sorted(
+                (issue for issue in issues if issue.category == category),
+                key=lambda issue: (
+                    severity_order[_severity_class(issue.severity)],
+                    _text(issue.location).casefold(),
+                    issue.code,
+                ),
+            )
+            if not category_issues:
+                continue
+            cards = "".join(
+                _issue_html(issue, numbered[id(issue)])
+                for issue in category_issues
+            )
+            count = sum(max(0, issue.impact) for issue in category_issues)
+            category_sections.append(
+                f'<section class="sheet-category" data-category="{category}">'
+                f'<h3>{_CATEGORY_LABELS[category]} · {count}</h3>'
+                f'<div class="issue-list">{cards}</div></section>'
+            )
+        root_count = len(issues)
+        label = display_names[key]
+        sections.append(
+            f'<section class="sheet-group" id="feuille-{sheet_index}">'
+            f'<div class="issue-group-header"><h2>{_html(label)}</h2>'
+            f'<span class="count-badge">{root_count} cause'
+            f'{"s" if root_count > 1 else ""}</span></div>'
+            + "".join(category_sections)
+            + "</section>"
+        )
+    missing_sections: list[str] = []
+    for category in _CATEGORY_ORDER:
+        represented = sum(
+            max(0, issue.impact)
+            for issue in country.anomalies
+            if issue.category == category
+        )
+        missing = max(0, country.counts[category] - represented)
+        if not missing:
+            continue
+        missing_sections.append(
+            f'<section class="sheet-category" data-category="{category}">'
+            f'<h3>{_CATEGORY_LABELS[category]} · {missing}</h3>'
+            '<div class="empty"><strong>Écarts agrégés sans localisation</strong>'
+            f'{missing} élément(s) supplémentaire(s) ont été comptés par le moteur source.'
+            "</div></section>"
+        )
+    if missing_sections:
+        sections.append(
+            '<section class="sheet-group" id="feuille-sans-localisation">'
+            '<div class="issue-group-header"><h2>Sans localisation détaillée</h2>'
+            '<span class="count-badge">agrégé</span></div>'
+            + "".join(missing_sections)
+            + "</section>"
+        )
+    return "".join(sections)
+
+
 def _alert(kind: str, title: str, messages: Sequence[str]) -> str:
     if not messages:
         return ""
@@ -1162,6 +1471,8 @@ def _alert(kind: str, title: str, messages: Sequence[str]) -> str:
 
 
 def _order_html(country: _Country) -> str:
+    if not any(issue.code == "SHEET_ORDER_CHANGED" for issue in country.anomalies):
+        return ""
     if not country.sheet_order_expected and not country.sheet_order_observed:
         return ""
     if country.sheet_order_expected == country.sheet_order_observed:
@@ -1218,21 +1529,29 @@ def _render_country(country: _Country, title: str) -> str:
         f'<article class="category-card" data-category="{category}"><span>{_CATEGORY_LABELS[category]}</span><strong id="count-{category}">{country.counts[category]}</strong></article>'
         for category in _CATEGORY_ORDER
     )
-    groups = "".join(_group_html(country, category) for category in _CATEGORY_ORDER)
+    groups = _sheet_groups_html(country)
     if not groups:
-        groups = (
-            '<div class="panel"><div class="empty">'
-            '<strong>Aucune anomalie structurelle détectée</strong>'
-            "Le classeur reçu conserve la structure du fichier de référence."
-            "</div></div>"
-        )
+        if country.total_anomalies:
+            groups = (
+                '<div class="panel"><div class="empty">'
+                f'<strong>{country.total_anomalies} écart(s) agrégé(s)</strong>'
+                "Le résultat source ne contient pas de localisation individuelle."
+                "</div></div>"
+            )
+        else:
+            groups = (
+                '<div class="panel"><div class="empty">'
+                '<strong>Aucune anomalie détectée</strong>'
+                "Le classeur reçu ne présente aucun écart dans le périmètre contrôlé."
+                "</div></div>"
+            )
 
     status_message = country.missing_reason
     if not status_message:
         if country.status_code == "conforme":
             status_message = "La structure du fichier reçu est conforme à la référence."
         elif country.status_code == "anomalies":
-            status_message = "Des modifications structurelles nécessitent une vérification."
+            status_message = "Des écarts nécessitent une vérification."
         else:
             status_message = "Consultez les informations ci-dessous."
 
@@ -1244,9 +1563,9 @@ def _render_country(country: _Country, title: str) -> str:
   <p class="subtitle">{_html(title)}</p>
 </div></header>
 <main>
-  <section class="summary-strip {country.tone}" data-status="{country.status_code}">
+  <section class="summary-strip {country.tone}" data-status="{country.status_code}" data-validation="{_html(country.validation_level)}">
     <div><span class="status {country.tone}" id="status-global">{_html(country.status_label)}</span><p>{_html(status_message)}</p></div>
-    <div class="summary-metrics"><div class="summary-metric"><span class="kpi-label">Causes structurelles</span><strong class="kpi-value" id="root-cause-count">{len(country.anomalies)}</strong></div><div class="summary-metric"><span class="kpi-label">Éléments affectés</span><strong class="kpi-value" id="total-anomalies">{country.total_anomalies}</strong></div></div>
+    <div class="summary-metrics"><div class="summary-metric"><span class="kpi-label">Causes racines</span><strong class="kpi-value" id="root-cause-count">{len(country.anomalies)}</strong></div><div class="summary-metric"><span class="kpi-label">Éléments directement concernés</span><strong class="kpi-value" id="total-anomalies">{country.total_anomalies}</strong></div></div>
   </section>
   {_alert("danger", "Erreurs rencontrées", country.errors)}
   {_alert("warning", "Avertissements", country.warnings)}

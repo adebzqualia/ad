@@ -20,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="popscheck",
         description=(
-            "Compare les structures des classeurs Excel POPS envoyés et reçus, "
+            "Compare la structure, les formules et les dépendances des classeurs Excel POPS, "
             "puis génère des rapports HTML."
         ),
     )
@@ -150,4 +150,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

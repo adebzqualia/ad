@@ -16,11 +16,24 @@ max_style_gap = 25
 detect_value_only_expansion = false
 report_ambiguities = true
 
+# Audits sémantiques. Les dépendances peuvent être activées même si la
+# comparaison détaillée des formules est désactivée.
+compare_formulas = true
+compare_dependencies = true
+compare_controlled_values = true
+max_dependency_depth = 8
+max_dependency_samples = 20
+numeric_absolute_tolerance = 0.0
+numeric_relative_tolerance = 0.0
+
 # Exemple de règle optionnelle. Décommentez et adaptez si vous connaissez les
-# zones dans lesquelles les pays peuvent librement saisir des données/formules.
+# zones métier du template.
 # [[sheet_rules]]
 # pattern = "Budget"
 # editable_ranges = ["D8:N100"]
+# formula_allowed_ranges = []
+# controlled_ranges = ["B2:B6"]
+# critical_ranges = ["B2:B2"]
 # monitored_ranges = ["A1:N120"]
 
 # [[sheet_rules]]

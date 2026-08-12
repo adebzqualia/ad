@@ -32,6 +32,8 @@ class CellFeature:
     formula: str = ""
     label: str = ""
     value_kind: str = "blank"
+    raw_formula: str = ""
+    value: Any = None
 
     @property
     def has_structural_evidence(self) -> bool:
@@ -367,9 +369,13 @@ def _extract_worksheet(
             snapshot.content_row_max = max(snapshot.content_row_max, row)
             snapshot.content_column_max = max(snapshot.content_column_max, column)
         formula = ""
+        raw_formula = ""
         label = ""
         value_kind = "blank"
         if cell.data_type == "f":
+            raw_formula = str(getattr(value, "text", value) or "")
+            if raw_formula and not raw_formula.startswith("="):
+                raw_formula = f"={raw_formula}"
             formula = normalize_formula(value, row, column)
             value_kind = "formula"
             snapshot.formula_row_max = max(snapshot.formula_row_max, row)
@@ -397,6 +403,8 @@ def _extract_worksheet(
                 formula=formula,
                 label=label,
                 value_kind=value_kind,
+                raw_formula=raw_formula,
+                value=None if raw_formula else value,
             )
 
     for merged_range in worksheet.merged_cells.ranges:

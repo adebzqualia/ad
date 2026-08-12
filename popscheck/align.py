@@ -33,6 +33,7 @@ class AxisItem:
     tokens: Counter[str]
     label: str = ""
     information: float = 0.0
+    unique_labels: frozenset[str] = frozenset()
 
 
 @dataclass(slots=True)
@@ -140,9 +141,10 @@ def build_axis_items(
             continue
 
         editable = rule.cell_is_editable(rule_row, rule_column)
+        formula_allowed = rule.formula_is_allowed(rule_row, rule_column)
         if feature.style:
             counters[index][_contextualize(f"S|{feature.style}", canonical_orthogonal)] += 1
-        if feature.formula and not editable:
+        if feature.formula and not formula_allowed:
             counters[index][_contextualize(f"F|{feature.formula}", canonical_orthogonal)] += 1
             topology = _RELATIVE_REFERENCE_RE.sub("REF", feature.formula)
             counters[index][_contextualize(f"P|{topology}", canonical_orthogonal)] += 1
@@ -189,6 +191,16 @@ def build_axis_items(
             if token:
                 counters[index][token] += 1
 
+    label_axis_counts: Counter[str] = Counter()
+    for tokens in counters[1:]:
+        label_axis_counts.update(
+            {
+                _base_token(token)
+                for token in tokens
+                if _base_token(token).startswith("L|")
+            }
+        )
+
     items: list[AxisItem] = []
     for index in range(1, extent + 1):
         tokens = counters[index]
@@ -204,9 +216,42 @@ def build_axis_items(
                 tokens=tokens,
                 label=item_label,
                 information=_weighted_size(tokens),
+                unique_labels=frozenset(
+                    label
+                    for label in {
+                        _base_token(token)
+                        for token in tokens
+                        if _base_token(token).startswith("L|")
+                    }
+                    if label_axis_counts[label] == 1
+                ),
             )
         )
     return items
+
+
+def _weighted_jaccard(
+    expected_tokens: Counter[str],
+    observed_tokens: Counter[str],
+    *,
+    ignored_kinds: frozenset[str] = frozenset(),
+) -> float:
+    all_tokens = {
+        token
+        for token in set(expected_tokens) | set(observed_tokens)
+        if _base_token(token).split("|", 1)[0] not in ignored_kinds
+    }
+    if not all_tokens:
+        return 0.0
+    intersection = 0.0
+    union = 0.0
+    for token in all_tokens:
+        weight = _token_weight(token)
+        expected_count = expected_tokens.get(token, 0)
+        observed_count = observed_tokens.get(token, 0)
+        intersection += min(expected_count, observed_count) * weight
+        union += max(expected_count, observed_count) * weight
+    return intersection / union if union else 0.0
 
 
 def axis_similarity(expected: AxisItem, observed: AxisItem) -> float:
@@ -216,16 +261,22 @@ def axis_similarity(expected: AxisItem, observed: AxisItem) -> float:
         return 1.0
     if not expected.tokens or not observed.tokens:
         return 0.0
-    all_tokens = set(expected.tokens) | set(observed.tokens)
-    intersection = 0.0
-    union = 0.0
-    for token in all_tokens:
-        weight = _token_weight(token)
-        expected_count = expected.tokens.get(token, 0)
-        observed_count = observed.tokens.get(token, 0)
-        intersection += min(expected_count, observed_count) * weight
-        union += max(expected_count, observed_count) * weight
-    return intersection / union if union else 0.0
+
+    full_score = _weighted_jaccard(expected.tokens, observed.tokens)
+
+    # Formula content is useful evidence when it is stable, but a formula audit
+    # must not turn a surviving row/column into DELETE+INSERT merely because its
+    # business logic changed.  A common textual label is the explicit structural
+    # anchor which lets us compare the remaining signature without formula text
+    # or topology; without that anchor we keep the conservative full score.
+    if expected.unique_labels & observed.unique_labels:
+        structural_score = _weighted_jaccard(
+            expected.tokens,
+            observed.tokens,
+            ignored_kinds=frozenset({"F", "P", "M", "T", "D"}),
+        )
+        return max(full_score, structural_score)
+    return full_score
 
 
 def _lis_positions(values: list[int]) -> set[int]:
@@ -593,5 +644,9 @@ def align_axis(
                 f"Ordre potentiellement modifié entre {expected_index} et {observed_index}, "
                 "mais les signatures ne permettent pas une identification certaine."
             )
-    result.ambiguities = list(dict.fromkeys(result.ambiguities))
+    result.ambiguities = (
+        list(dict.fromkeys(result.ambiguities))
+        if analysis.report_ambiguities
+        else []
+    )
     return result

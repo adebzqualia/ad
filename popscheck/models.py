@@ -29,6 +29,11 @@ class Anomaly:
     location: str | None = None
     expected: Any = None
     observed: Any = None
+    id: str | None = None
+    confidence: Any = None
+    consequences: list[dict[str, Any]] = field(default_factory=list)
+    action: dict[str, Any] = field(default_factory=dict)
+    noise_reduction: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -54,7 +59,16 @@ class CountryResult:
 
     @property
     def counts(self) -> dict[str, int]:
-        counts = {"feuilles": 0, "colonnes": 0, "lignes": 0, "fichier": 0}
+        counts = {
+            "feuilles": 0,
+            "colonnes": 0,
+            "lignes": 0,
+            "formules": 0,
+            "dependances": 0,
+            "valeurs": 0,
+            "fichier": 0,
+            "autres": 0,
+        }
         for anomaly in self.anomalies:
             counts[anomaly.category] = counts.get(anomaly.category, 0) + max(0, anomaly.impact)
         return counts
@@ -67,18 +81,59 @@ class CountryResult:
         return counts
 
     @property
+    def root_counts_by_code(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for anomaly in self.anomalies:
+            counts[anomaly.code] = counts.get(anomaly.code, 0) + 1
+        return counts
+
+    @property
+    def impact_summary(self) -> dict[str, int]:
+        summary = {"confirmed": 0, "probable": 0, "possible": 0}
+        ranks = {"possible": 0, "probable": 1, "confirmed": 2}
+        identified_targets: dict[str, str] = {}
+        unidentified = {"confirmed": 0, "probable": 0, "possible": 0}
+        for anomaly in self.anomalies:
+            for consequence in anomaly.consequences:
+                certainty = str(consequence.get("certainty", "possible")).casefold()
+                if certainty not in summary:
+                    certainty = "possible"
+                raw_count = consequence.get(
+                    "unique_target_count", consequence.get("count", 0)
+                )
+                try:
+                    count = int(raw_count or 0)
+                except (TypeError, ValueError):
+                    count = 0
+                target_ids = {
+                    str(item) for item in consequence.get("target_ids", ()) if item
+                }
+                for target_id in target_ids:
+                    previous = identified_targets.get(target_id)
+                    if previous is None or ranks[certainty] > ranks[previous]:
+                        identified_targets[target_id] = certainty
+                unidentified[certainty] += max(0, count - len(target_ids))
+        for certainty in identified_targets.values():
+            summary[certainty] += 1
+        for certainty, count in unidentified.items():
+            summary[certainty] += count
+        return summary
+
+    @property
     def root_cause_count(self) -> int:
         return len(self.anomalies)
 
     @property
     def validation_level(self) -> str:
+        if self.errors:
+            return "error"
         if self.status in {
             Status.FICHIER_MANQUANT,
             Status.SANS_REFERENCE,
             Status.ERREUR,
         }:
             return "error"
-        error_severities = {"error", "critical", "danger", "fatal"}
+        error_severities = {"error", "critical", "danger", "high", "fatal"}
         if any(
             str(anomaly.severity).casefold() in error_severities
             for anomaly in self.anomalies
@@ -101,6 +156,8 @@ class CountryResult:
         data["validation_level"] = self.validation_level
         data["counts"] = self.counts
         data["counts_by_code"] = self.counts_by_code
+        data["root_counts_by_code"] = self.root_counts_by_code
+        data["impact_summary"] = self.impact_summary
         return data
 
 

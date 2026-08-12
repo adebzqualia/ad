@@ -1,6 +1,6 @@
 # POPS Check
 
-POPS Check compare les classeurs Excel envoyés aux pays avec les classeurs retournés et génère des rapports de conformité structurelle. Il cherche les feuilles, lignes et colonnes ajoutées, supprimées ou déplacées, tout en évitant de considérer les saisies métier normales comme des anomalies.
+POPS Check compare les classeurs Excel envoyés aux pays avec les classeurs retournés et génère des rapports de contrôle opérationnel. Il recherche les causes racines structurelles, puis compare les formules, les dépendances entre feuilles et les valeurs explicitement contrôlées après réalignement des coordonnées.
 
 > [!IMPORTANT]
 > POPS Check contrôle la structure du template. Il ne valide pas la justesse d'un budget, d'une prévision ou d'un autre contenu métier.
@@ -10,8 +10,11 @@ POPS Check compare les classeurs Excel envoyés aux pays avec les classeurs reto
 - appariement automatique des fichiers de référence et des fichiers reçus ;
 - détection des feuilles ajoutées, supprimées ou réordonnées ;
 - détection des lignes et colonnes ajoutées, supprimées ou déplacées ;
+- comparaison sémantique des formules après réalignement, avec distinction entre formule ajoutée, supprimée, remplacée par une valeur, réellement modifiée ou contenant `#REF!` ;
+- inventaire des dépendances inter-feuilles et des liens externes statiques, avec rattachement des impacts confirmés, probables ou possibles à la cause racine ;
+- comparaison configurable des valeurs dans des plages contrôlées ou critiques, tandis que les valeurs des zones éditables restent autorisées ;
 - prise en compte des formules, libellés stables, styles, fusions, tables, validations et dimensions comme indices structurels ;
-- exclusion configurable des zones dans lesquelles les pays peuvent saisir librement ;
+- actions recommandées et message pays directement exploitables dans le rapport ;
 - traitement de tout le lot même lorsqu'un classeur individuel est absent, illisible ou invalide ;
 - rapport HTML global, rapport détaillé par pays et export JSON structuré ;
 - exécution entièrement locale, sans Excel et sans service externe.
@@ -201,9 +204,21 @@ max_style_gap = 25
 detect_value_only_expansion = false
 report_ambiguities = true
 
+# Contrôles sémantiques et limites du graphe de dépendances.
+compare_formulas = true
+compare_dependencies = true
+compare_controlled_values = true
+max_dependency_depth = 8
+max_dependency_samples = 20
+numeric_absolute_tolerance = 0.0
+numeric_relative_tolerance = 0.0
+
 [[sheet_rules]]
 pattern = "Budget"
 editable_ranges = ["D8:N100"]
+formula_allowed_ranges = []
+controlled_ranges = ["B2:B6"]
+critical_ranges = ["B2:B2"]
 monitored_ranges = ["A1:N120"]
 
 [[sheet_rules]]
@@ -231,6 +246,13 @@ Les clés inconnues, plages invalides et seuils hors limites arrêtent la comman
 | `max_style_gap` | Distance maximale permettant à des styles ou dimensions isolés de prolonger la zone structurelle utile. |
 | `detect_value_only_expansion` | Si `true`, une simple valeur au-delà du template peut être considérée comme une extension de ligne ou colonne. |
 | `report_ambiguities` | Ajoute aux avertissements les changements d'ordre qui ne peuvent pas être localisés avec une confiance suffisante. |
+| `compare_formulas` | Active la comparaison des formules après réalignement des lignes et colonnes. |
+| `compare_dependencies` | Active les dépendances inter-feuilles, liens externes et conséquences rattachées aux causes structurelles. Fonctionne indépendamment de `compare_formulas`. |
+| `compare_controlled_values` | Compare les valeurs littérales uniquement dans les plages contrôlées ou critiques. |
+| `max_dependency_depth` | Profondeur maximale de propagation statique vers les feuilles aval. |
+| `max_dependency_samples` | Nombre maximal de localisations d'exemple conservées par groupe d'impact. |
+| `numeric_absolute_tolerance` | Tolérance absolue pour les nombres des zones contrôlées. |
+| `numeric_relative_tolerance` | Tolérance relative pour les nombres des zones contrôlées. |
 
 Les seuils par défaut sont volontairement conservateurs. Ne les modifiez qu'après validation sur un échantillon représentatif de fichiers POPS. En particulier, abaisser `move_min_similarity` augmente le risque d'annoncer de faux déplacements.
 
@@ -238,13 +260,16 @@ Les seuils par défaut sont volontairement conservateurs. Ne les modifiez qu'apr
 
 Chaque règle s'applique aux feuilles dont le nom correspond à `pattern`. La comparaison est insensible à la casse et accepte des jokers tels que `*` et `?`.
 
-- `editable_ranges` contient des rectangles Excel finis, par exemple `D8:N100`. Dans ces plages, les libellés et formules ne servent pas d'ancres structurelles. Les styles restent utilisables comme signal faible.
+- `editable_ranges` autorise les changements de **valeurs** saisis par le pays. Une formule ou un lien externe ajouté dans cette zone reste contrôlé.
+- `formula_allowed_ranges` autorise explicitement les formules et leurs dépendances à varier sans anomalie.
+- `controlled_ranges` compare les valeurs littérales après réalignement des coordonnées.
+- `critical_ranges` applique les mêmes contrôles avec une gravité `error` et rend critique la suppression d'une ligne ou colonne qui traverse la plage.
 - `monitored_ranges` limite l'analyse interne de la feuille aux plages indiquées. Sans cette clé, toute la zone utile est analysée.
 - `ignore = true` désactive la comparaison des lignes et colonnes internes de la feuille.
 
 Une feuille ignorée reste néanmoins contrôlée au niveau du classeur : son absence, son ajout ou son changement de position peut toujours être signalé.
 
-Plusieurs règles peuvent correspondre à la même feuille. Leurs plages sont cumulées ; pour `ignore`, la dernière règle correspondante l'emporte. Placez donc les règles générales avant les règles particulières.
+Plusieurs règles peuvent correspondre à la même feuille. Leurs plages sont cumulées ; les zones contrôlées ou critiques ont priorité sur une zone éditable ou une zone de formules autorisées. Pour `ignore`, la dernière règle correspondante l'emporte. Placez donc les règles générales avant les règles particulières.
 
 ## Rapports générés
 
@@ -269,9 +294,9 @@ Le rapport global affiche :
 - les erreurs d'analyse ;
 - le nombre total d'anomalies structurelles.
 
-Chaque ligne mène à un rapport détaillé indiquant les fichiers comparés, le statut, les avertissements, l'ordre des feuilles et les positions attendues ou observées des anomalies. Les cartes d'anomalie affichent aussi une localisation Excel canonique, par exemple `'Forecast'!F:F` ou `'Budget'!25:25`, ainsi que les états attendu et reçu (`Absent` lorsque l'élément manque). Une synthèse des dimensions attendues et reçues apparaît pour les feuilles dont le nombre de lignes ou de colonnes diffère.
+Chaque ligne mène à un rapport détaillé organisé selon la hiérarchie **fichier → feuille → cause racine → conséquences**. Une carte indique l'identifiant stable, le code, la localisation Excel canonique (`'Forecast'!F:F`, `'Budget'!25:28` ou `'Summary'!B12`), les états attendu et reçu, la confiance, les impacts confirmés/probables/possibles, l'action recommandée et un message prêt à transmettre au pays. Une synthèse des dimensions attendues et reçues apparaît pour les feuilles dont le nombre de lignes ou de colonnes diffère.
 
-Le fichier `resultats.json` contient les mêmes résultats sous une forme exploitable par un autre outil. `root_cause_count` compte les groupes structurels affichés, `total_anomalies` compte les éléments affectés, `counts_by_code` fournit le détail par type (`ROW_REMOVED`, `COLUMN_ADDED`, etc.) et `validation_level` expose un niveau normalisé `ok`, `warning` ou `error`. Les rapports HTML sont autonomes : leurs styles et scripts sont intégrés et aucune connexion Internet n'est nécessaire.
+Le fichier `resultats.json` contient les mêmes résultats sous une forme exploitable par un autre outil. `root_cause_count` compte les cartes de causes racines, `total_anomalies` compte les éléments directement concernés, `root_counts_by_code` compte les causes, `counts_by_code` compte les éléments, et `impact_summary` sépare les objets impactés confirmés, probables et possibles. `validation_level` expose un niveau normalisé `ok`, `warning` ou `error`. Les conséquences ne sont pas recopiées comme anomalies indépendantes.
 
 Ouvrez le rapport global sous Windows avec :
 
@@ -285,8 +310,8 @@ Les fichiers de l'exécution courante sont remplacés de manière atomique, mais
 
 | Statut | Signification |
 | --- | --- |
-| **Conforme** | Aucune anomalie structurelle confirmée. Des avertissements non bloquants peuvent néanmoins être présents. |
-| **Anomalies** | Au moins une feuille, ligne ou colonne a été ajoutée, supprimée ou déplacée, ou le type d'une feuille a changé. |
+| **Conforme** | Aucune cause racine détectée. Des avertissements non bloquants peuvent néanmoins être présents. |
+| **Anomalies** | Au moins une cause racine de structure, formule, dépendance ou valeur contrôlée a été détectée. |
 | **Fichier manquant** | Une référence existe dans `sent`, mais aucun retour correspondant n'existe dans `received`. |
 | **Sans référence** | Un fichier reçu existe, mais aucune référence correspondante n'existe dans `sent`. |
 | **Erreur** | Le classeur est illisible, dépasse une limite de sûreté, provoque une erreur d'analyse ou entre en collision avec un autre nom. |
@@ -324,25 +349,31 @@ Une erreur limitée à un seul classeur devient un résultat **Erreur** dans les
 
 ## Périmètre actuel
 
-POPS Check détecte ou utilise actuellement :
+POPS Check contrôle actuellement :
 
 - présence, absence, type et ordre relatif des feuilles ;
 - ajout, suppression et déplacement de lignes ou colonnes ;
-- formules normalisées, libellés stables, styles et dimensions comme indices d'appariement ;
-- plages fusionnées, validations de données et tables Excel comme indices structurels ;
-- état visible/masqué d'une feuille sous forme d'avertissement.
+- ajout, suppression, remplacement par une valeur et modification d'une formule dans une cellule survivante, après projection des coordonnées reçues vers le template ;
+- références statiques entre feuilles, références `#REF!`, feuilles référencées manquantes et liens externes présents dans les formules ;
+- noms définis et tables utilisés par une formule lorsqu'ils disparaissent ou que leur définition change ;
+- valeurs littérales des seules plages déclarées dans `controlled_ranges` ou `critical_ranges` ;
+- état visible/masqué d'une feuille sous forme d'avertissement ;
+- libellés stables, styles, dimensions, plages fusionnées, validations et tables comme indices d'appariement structurel.
 
-Les contrôles suivants ne font pas encore l'objet d'un audit exhaustif et indépendant :
+L'analyse des formules est volontairement conservatrice : elle normalise les références et ignore les différences d'espacement, mais ce n'est ni le moteur de calcul d'Excel ni une preuve d'équivalence algébrique. Elle ne recalcule pas les résultats. Des parenthèses redondantes ou un opérateur unaire peuvent donc rester visibles comme modification de logique.
 
-- modification exacte d'une formule cellule par cellule ;
-- modification de styles ou de formats ;
-- ajout ou suppression d'une fusion, d'une validation ou d'une table ;
-- mise en forme conditionnelle, graphiques, tableaux croisés dynamiques et segments ;
-- noms définis, connexions, requêtes, liens externes ou références cassées ;
+Les points suivants nécessitent encore une vérification humaine ou un outil Excel spécialisé :
+
+- résolution certaine des dépendances dynamiques construites avec `INDIRECT`, `OFFSET` ou du texte ; elles sont signalées comme impacts possibles lorsque la feuille cible peut être identifiée ;
+- propagation cellule par cellule à l'intérieur d'une même feuille : les consommateurs directs sont localisés, puis la propagation statique aval est synthétisée au niveau des feuilles ;
+- renommage d'une feuille : sans règle d'alias ou identifiant métier, il est rendu prudemment comme une suppression et un ajout ;
+- équivalence algébrique complète, résultat recalculé, cache de calcul et comportement des fonctions volatiles ;
+- audit indépendant des styles, formats, fusions, validations, tables et noms qui ne sont référencés par aucune formule ;
+- connexions de données, Power Query, mises en forme conditionnelles, graphiques, tableaux croisés dynamiques et segments ;
 - contenu et comportement des macros ;
-- validité métier des valeurs saisies.
+- validité métier des valeurs saisies hors des plages contrôlées configurées.
 
-Une modification de ces éléments peut influencer la signature structurelle, mais POPS Check ne doit pas être présenté comme leur outil d'audit dédié dans cette version.
+Les références 3-D et les dépendances opaques sont conservées comme avertissements ou impacts possibles : le rapport ne les présente jamais comme une causalité certaine.
 
 ## Limites fondamentales
 
@@ -429,4 +460,4 @@ La suite automatisée repose sur `unittest` et génère ses classeurs dans des d
   -v
 ```
 
-Les tests couvrent notamment les saisies normales, les ajouts, suppressions et déplacements d'axes, les remplacements à cardinalité constante, les modifications simultanées de lignes et colonnes, les suppressions physiques laissant des dimensions Excel résiduelles, les limites de `monitored_ranges`, l'ordre des feuilles, les fichiers absents ou corrompus, l'immuabilité des fichiers d'entrée, les rapports HTML et les codes de sortie de la CLI.
+Les tests couvrent notamment les saisies normales, les ajouts, suppressions et déplacements d'axes, les remplacements à cardinalité constante, les modifications simultanées de lignes et colonnes, les suppressions physiques laissant des dimensions Excel résiduelles, les limites de `monitored_ranges`, les formules décalées, références cassées, dépendances, liens externes, noms définis, tables, valeurs contrôlées, l'ordre des feuilles, les fichiers absents ou corrompus, l'immuabilité des fichiers d'entrée, les rapports HTML et les codes de sortie de la CLI.
